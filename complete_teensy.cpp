@@ -13,6 +13,8 @@
 #include <Adafruit_BNO055.h>
 // for bmp280
 #include <Adafruit_BMP280.h>
+//for lora 
+#include <RH_RF95.h>
 
 // BMP280 barometric pressure/altitude sensors
 Adafruit_BMP280 bmp1(&Wire);  // First sensor on primary I2C bus
@@ -81,6 +83,17 @@ bool nanoValue3 = false;
 bool nanoValue4 = false;
 unsigned long lastReceiveTime = 0;
 bool dataReceived = false;
+
+// Pin definitions for LoRa
+#define LORA_CS 10
+#define LORA_RST 9 
+#define LORA_INT 8
+
+// RF frequency - set according to your region (915MHz for US, 868MHz for EU)
+#define RF95_FREQ 467.5
+
+// Initialize LoRa instance
+RH_RF95 rf95(LORA_CS, LORA_INT);
 
 // DMA and ADC
 ADC *adc = new ADC(); // adc object
@@ -171,6 +184,109 @@ void receiveEvent(int numBytes)
   }
 }
 
+// Function to transmit data via LoRa
+void transmitLoRa(const String& data) {
+  // Convert String to char array for RadioHead library
+  char buffer[250];
+  data.toCharArray(buffer, data.length() + 1);
+  
+  rf95.send((uint8_t*)buffer, strlen(buffer));
+  rf95.waitPacketSent();
+  
+  Serial.println("Data transmitted via LoRa");
+}
+
+// Function to transmit all data in binary format
+void transmitBinaryData() {
+  uint8_t buffer[80]; // Larger buffer to accommodate all values
+  int index = 0;
+  
+  // Pack record serial number (4 bytes)
+  uint32_t sn = recordSN;
+  memcpy(&buffer[index], &sn, 4);
+  index += 4;
+  
+  // Pack time - minute and second (2 bytes)
+  uint8_t min = minute(now());
+  uint8_t sec = second(now());
+  buffer[index++] = min;
+  buffer[index++] = sec;
+  
+  // Pack nano values (all 4 booleans in 1 byte)
+  uint8_t nanoFlags = 0;
+  if (nanoValue1) nanoFlags |= 0x01;
+  if (nanoValue2) nanoFlags |= 0x02;
+  if (nanoValue3) nanoFlags |= 0x04;
+  if (nanoValue4) nanoFlags |= 0x08;
+  buffer[index++] = nanoFlags;
+  
+  // Pack valve state (1 byte)
+  buffer[index++] = Valve_state ? 1 : 0;
+  
+  // Pack analog values (8 bytes)
+  float a1 = analog1;
+  float a2 = analog2;
+  memcpy(&buffer[index], &a1, 4);
+  index += 4;
+  memcpy(&buffer[index], &a2, 4);
+  index += 4;
+  
+  // Pack position values (8 bytes)
+  float xp = -xPos;  // Converting double to float for transmission
+  float yp = -yPos;
+  memcpy(&buffer[index], &xp, 4);
+  index += 4;
+  memcpy(&buffer[index], &yp, 4);
+  index += 4;
+  
+  // Pack altitude (4 bytes)
+  float alt = averageAltitude;
+  memcpy(&buffer[index], &alt, 4);
+  index += 4;
+  
+  // Pack euler angles (12 bytes)
+  float ex = euler.x(), ey = euler.y(), ez = euler.z();
+  memcpy(&buffer[index], &ex, 4);
+  index += 4;
+  memcpy(&buffer[index], &ey, 4);
+  index += 4;
+  memcpy(&buffer[index], &ez, 4);
+  index += 4;
+  
+  // Pack linear acceleration (12 bytes)
+  float lx = linearAccel.x(), ly = linearAccel.y(), lz = linearAccel.z();
+  memcpy(&buffer[index], &lx, 4);
+  index += 4;
+  memcpy(&buffer[index], &ly, 4);
+  index += 4;
+  memcpy(&buffer[index], &lz, 4);
+  index += 4;
+  
+  // Pack hardcoded values (12 bytes)
+  float hc1 = 12.123456f;
+  float hc2 = 12.123456f;
+  float hc3 = 1234.12f;
+  memcpy(&buffer[index], &hc1, 4);
+  index += 4;
+  memcpy(&buffer[index], &hc2, 4);
+  index += 4;
+  memcpy(&buffer[index], &hc3, 4);
+  index += 4;
+  
+  // Pack temperature (4 bytes)
+  float temp = InternalTemp;
+  memcpy(&buffer[index], &temp, 4);
+  index += 4;
+  
+  // Transmit the binary packet
+  rf95.send(buffer, index);
+  rf95.waitPacketSent();
+  
+  Serial.print("Binary data sent: ");
+  Serial.print(index);
+  Serial.println(" bytes");
+}
+
 void task1()
 {
   while (true)
@@ -232,6 +348,7 @@ void task2()
       // monitoringAltitude = false; // Stop monitoring after deployment
     }
     
+    digitalWrite(Valve_PIN, Valve_state ? HIGH : LOW);
     // // Reset monitoring if nanoValue4 becomes 0
     // if (!nanoValue4 && monitoringAltitude) {
     //   monitoringAltitude = false;
@@ -275,7 +392,11 @@ void task3()
 
     Serial.println(data);
 
+        // Transmit data
+    // transmitLoRa(data);
+
     // need to do binary encoding to transmit it
+    transmitBinaryData();
     
     // String data2 = String(nanoValue1 ? 1 : 0) + "," +
     //                String(nanoValue2 ? 1 : 0) + "," +
@@ -283,7 +404,7 @@ void task3()
     //                String(nanoValue4 ? 1 : 0);
     // Serial.println(data2);
 
-    delay(500);
+    delay(100);
   }
 }
 
@@ -332,6 +453,40 @@ void task4_bno055()
     delay(BNO055_SAMPLERATE_DELAY_MS);
   }
 }
+// Function to initialize LoRa
+bool initLoRa() {
+  pinMode(LORA_RST, OUTPUT);
+  
+  // Reset LoRa module
+  digitalWrite(LORA_RST, LOW);
+  delay(10);
+  digitalWrite(LORA_RST, HIGH);
+  delay(10);
+  
+  // Initialize LoRa
+  if (!rf95.init()) {
+    Serial.println("LoRa initialization failed");
+    return false;
+  }
+  
+  // Set frequency
+  if (!rf95.setFrequency(RF95_FREQ)) {
+    Serial.println("Setting frequency failed");
+    return false;
+  }
+
+  rf95.setSignalBandwidth(125000);
+  rf95.setCodingRate4(5);
+  rf95.setSpreadingFactor(7);
+
+  
+  
+  // Set transmitter power (5 to 23 dBm)
+  rf95.setTxPower(23, false);
+  
+  Serial.println("LoRa initialized successfully");
+  return true;
+}
 
 void adc0_isr()
 {
@@ -361,10 +516,10 @@ void setup()
 {
   Serial.begin(115200);
   // Wait for USB Serial
-  while (!Serial)
-  {
-    yield();
-  }
+  // while (!Serial)
+  // {
+  //   yield();
+  // }
 
   // Debug prints
   Serial.println("Starting...");
@@ -450,6 +605,7 @@ void setup()
   // valve control
   pinMode(Valve_PIN, OUTPUT);
   pinMode(SWITCH_PIN, INPUT_PULLUP);
+  digitalWrite(Valve_PIN, LOW);
 
   // Initialize BNO055
   if (!bno.begin())
@@ -464,6 +620,11 @@ void setup()
     ACCEL_POS_TRANSITION = 0.5 * ACCEL_VEL_TRANSITION * ACCEL_VEL_TRANSITION;
   }
   delay(1000);
+
+  if (!initLoRa()) {
+  Serial.println("LoRa failed to initialize");
+  }
+
 
   // Start each task with error checking
   if (threads.addThread(task1) == -1)

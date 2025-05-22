@@ -36,6 +36,7 @@ int stableMasterState = LOW;        // Current stable state of master input
 const int ignitionpin = 8;
 const int teensypower = 11;
 const int buzzerPin = 2;
+const int rf433pin = 12;
 
 bool teensystate = LOW;
 bool ignitionstate = LOW;
@@ -281,11 +282,13 @@ void setup()
   pinMode(ignitionpin, OUTPUT);
   pinMode(buzzerPin, OUTPUT);
   pinMode(teensypower, OUTPUT);
+  pinMode(rf433pin, OUTPUT);
 
   // Initialize all outputs to LOW
   digitalWrite(ignitionpin, LOW);
   digitalWrite(buzzerPin, LOW);
   digitalWrite(teensypower, LOW);
+  digitalWrite(rf433pin, HIGH); // Set RF433 pin HIGH
   // Optional: Start serial for debugging
 
   // Initialize valves
@@ -323,7 +326,7 @@ void TaskSensorRead(void *pvParameters)
           outputState1 = !outputState1; // Toggle output state
           Serial.print("Output 1 toggled to: ");
           Serial.println(outputState1 ? "HIGH" : "LOW");
-          // Buzz(2, 100, 100);  // 2 buzzes, 100ms on, 100ms off
+          Buzz(2, 100, 900);  // 2 buzzes, 100ms on, 100ms off
         }
 
         // Only allow input2 to work if outputState1 is HIGH (input1 has been activated)
@@ -338,6 +341,7 @@ void TaskSensorRead(void *pvParameters)
             // Start the ignition sequence
             Buzz(3, 100, 900);
             digitalWrite(ignitionpin, HIGH);
+            digitalWrite(rf433pin, LOW); // Set RF433 pin LOW
             currentIgnitionState = IGNITION_ON;
             ignitionStartTime = millis();
           }
@@ -452,9 +456,12 @@ void TaskCommunication(void *pvParameters)
       int currentInput3 = digitalRead(inputPin3);
       int currentInput4 = digitalRead(inputPin4);
       if (getStableMasterState() == HIGH)
-      {
+      { 
+        // Add this check to see if manual valve control is triggered
+        bool manualControl = false;
         if (currentInput3 == HIGH && prevInput3 == LOW)
-        {
+        { 
+          manualControl = true;
           outputState3 = !outputState3;
           Serial.print("Output 3 toggled to: ");
           Serial.println(outputState3 ? "HIGH" : "LOW");
@@ -472,7 +479,8 @@ void TaskCommunication(void *pvParameters)
         }
 
         if (currentInput4 == HIGH && prevInput4 == LOW)
-        {
+        { 
+          manualControl = true;
           outputState4 = !outputState4;
           Serial.print("Output 4 toggled to: ");
           Serial.println(outputState4 ? "HIGH" : "LOW");
@@ -487,6 +495,12 @@ void TaskCommunication(void *pvParameters)
             valve2.close(); // Close the second valve
             Buzz(1, 100, 100);
           }
+        }
+        // If manual control occurred, interrupt the ignition sequence
+        if (manualControl && currentIgnitionState != IDLE) {
+            Serial.println("Manual valve control detected - interrupting ignition sequence");
+            currentIgnitionState = IDLE;
+            outputState2 = LOW; // Reset output state
         }
       }
       // else
