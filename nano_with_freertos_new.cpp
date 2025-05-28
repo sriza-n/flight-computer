@@ -6,8 +6,6 @@
 
 // for freertos tasks-----------------------------------------------
 TaskHandle_t Task1Handle;
-TaskHandle_t Task2Handle;
-TaskHandle_t Task3Handle;
 TaskHandle_t Task4Handle;
 
 // Semaphore for protecting shared resources
@@ -15,8 +13,6 @@ SemaphoreHandle_t xSerialSemaphore;
 
 // Task functions prototypes
 void TaskSensorRead(void *pvParameters);
-// void TaskDataProcess(void *pvParameters);
-// void TaskActuatorControl(void *pvParameters);
 void TaskCommunication(void *pvParameters);
 
 // ----------input pins to get status of 433mhz receiver-----------------
@@ -52,8 +48,10 @@ int prevInput4 = LOW;
 // Variables to store output states
 int outputState1 = LOW;
 int outputState2 = LOW;
-int outputState3 = LOW;
-int outputState4 = LOW;
+
+volatile bool masterStateIsHigh = false;
+volatile bool manualValveControl = false;
+
 // Define the Teensy's I2C address
 #define TEENSY_I2C_ADDRESS 0x42
 
@@ -68,7 +66,7 @@ enum IgnitionState
   COMPLETE
 };
 
-IgnitionState currentIgnitionState = IDLE;
+volatile IgnitionState currentIgnitionState = IDLE;
 unsigned long ignitionStartTime = 0;
 
 // Valve class to encapsulate servo movement for valve operations
@@ -105,7 +103,7 @@ public:
     if (isOpened)
       return; // Skip if already open
 
-    Serial.println("Opening valve on pin " + String(servoPin));
+    // Serial.println("Opening valve on pin " + String(servoPin));
     // Step by 5 degrees instead of 1 degree (5x faster)
     for (int angle = 0; angle <= 180; angle += 1)
     {
@@ -125,7 +123,7 @@ public:
     if (!isOpened)
       return; // Skip if already closed
 
-    Serial.println("Closing valve on pin " + String(servoPin));
+    // Serial.println("Closing valve on pin " + String(servoPin));
     // Step by 5 degrees instead of 1 degree (5x faster)
     for (int angle = 180; angle >= 0; angle -= 1)
     {
@@ -245,28 +243,12 @@ void setup()
       &Task1Handle    // Task handle
   );
 
-  // xTaskCreate(
-  //     TaskDataProcess,
-  //     "DataProcess",
-  //     128,
-  //     NULL,
-  //     3,
-  //     &Task2Handle);
-
-  // xTaskCreate(
-  //     TaskActuatorControl,
-  //     "ActuatorControl",
-  //     128,
-  //     NULL,
-  //     4, // Higher priority for control tasks
-  //     &Task3Handle);
-
   xTaskCreate(
       TaskCommunication,
       "Communication",
-      128,
+      128, 
       NULL,
-      2,
+      1,
       &Task4Handle);
 
   // The scheduler is started automatically after setup()
@@ -312,12 +294,12 @@ void TaskSensorRead(void *pvParameters)
     {
       // Serial.println("Task 1");
       // Read current input states
-      // Read current input states
       int currentInput1 = digitalRead(inputPin1);
       int currentInput2 = digitalRead(inputPin2);
 
+      masterStateIsHigh = (getStableMasterState() == HIGH);
       // read state of master input
-      if (getStableMasterState() == HIGH)
+      if (masterStateIsHigh)
       {
         digitalWrite(teensypower, HIGH);
 
@@ -326,7 +308,7 @@ void TaskSensorRead(void *pvParameters)
           outputState1 = !outputState1; // Toggle output state
           Serial.print("Output 1 toggled to: ");
           Serial.println(outputState1 ? "HIGH" : "LOW");
-          Buzz(2, 100, 900);  // 2 buzzes, 100ms on, 100ms off
+          Buzz(2, 100, 900); // 2 buzzes, 100ms on, 100ms off
         }
 
         // Only allow input2 to work if outputState1 is HIGH (input1 has been activated)
@@ -341,14 +323,13 @@ void TaskSensorRead(void *pvParameters)
             // Start the ignition sequence
             Buzz(3, 100, 900);
             digitalWrite(ignitionpin, HIGH);
-            digitalWrite(rf433pin, LOW); // Set RF433 pin LOW
+            // digitalWrite(rf433pin, LOW); // Set RF433 pin LOW
             currentIgnitionState = IGNITION_ON;
             ignitionStartTime = millis();
           }
         }
       }
-      else
-      {
+      else{
         // Do something when master input is LOW
         outputState1 = LOW;
         digitalWrite(ignitionpin, LOW);
@@ -412,39 +393,7 @@ void TaskSensorRead(void *pvParameters)
   }
 }
 
-// // Task 2: Process data
-// void TaskDataProcess(void *pvParameters)
-// {
-//   for (;;)
-//   {
-//     if (xSemaphoreTake(xSerialSemaphore, (TickType_t)10) == pdTRUE)
-//     {
-//       Serial.println("Running Task 2");
-
-//       xSemaphoreGive(xSerialSemaphore);
-//     }
-
-//     vTaskDelay(130 / portTICK_PERIOD_MS); // 200ms delay
-//   }
-// }
-
-// // Task 3: Control actuators
-// void TaskActuatorControl(void *pvParameters)
-// {
-//   for (;;)
-//   {
-//     if (xSemaphoreTake(xSerialSemaphore, (TickType_t)10) == pdTRUE)
-//     {
-//       Serial.println("Running Task 3");
-
-//       xSemaphoreGive(xSerialSemaphore);
-//     }
-
-//     vTaskDelay(130 / portTICK_PERIOD_MS); // 500ms delay
-//   }
-// }
-
-// Task 4: Communication/logging
+// Task 2: Communication/logging
 void TaskCommunication(void *pvParameters)
 {
   for (;;)
@@ -455,57 +404,55 @@ void TaskCommunication(void *pvParameters)
       // ------------------valve control-----------------------
       int currentInput3 = digitalRead(inputPin3);
       int currentInput4 = digitalRead(inputPin4);
-      if (getStableMasterState() == HIGH)
-      { 
+      manualValveControl = false;
+      if (masterStateIsHigh)
+      {
         // Add this check to see if manual valve control is triggered
-        bool manualControl = false;
+        
         if (currentInput3 == HIGH && prevInput3 == LOW)
-        { 
-          manualControl = true;
-          outputState3 = !outputState3;
-          Serial.print("Output 3 toggled to: ");
-          Serial.println(outputState3 ? "HIGH" : "LOW");
-          // toggle valve1
-          if (outputState3 == HIGH)
+        {
+          if (valve1.isOpen())
           {
-            valve1.open();     // Open the first valve
-            Buzz(1, 100, 100); // 3 buzzes, 100ms on, 900ms off
+            valve1.close(); // Close the valve if it's open
+            Serial.println("Valve 1 closed");
           }
           else
           {
-            valve1.close(); // Close the first valve
-            Buzz(1, 100, 100);
+            valve1.open(); // Open the valve if it's closed
+            Serial.println("Valve 1 opened");
           }
+          Buzz(1, 100, 100);
+          manualValveControl = true;
         }
 
         if (currentInput4 == HIGH && prevInput4 == LOW)
-        { 
-          manualControl = true;
-          outputState4 = !outputState4;
-          Serial.print("Output 4 toggled to: ");
-          Serial.println(outputState4 ? "HIGH" : "LOW");
-          // toggle valve2
-          if (outputState4 == HIGH)
+        {
+          if (valve2.isOpen())
           {
-            valve2.open();     // Open the second valve
-            Buzz(1, 100, 100); // 3 buzzes, 100ms on, 900ms off
+            valve2.close(); // Close the valve if it's open
+            Serial.println("Valve 2 closed");
           }
           else
           {
-            valve2.close(); // Close the second valve
-            Buzz(1, 100, 100);
+            valve2.open(); // Open the valve if it's closed
+            Serial.println("Valve 2 opened");
           }
+          Buzz(1, 100, 100);
+          manualValveControl = true;
         }
+
         // If manual control occurred, interrupt the ignition sequence
-        // if (manualControl && currentIgnitionState != IDLE) {
-        //     Serial.println("Manual valve control detected - interrupting ignition sequence");
-        //     currentIgnitionState = IDLE;
-        //     outputState2 = LOW; // Reset output state
-        // }
+        if (manualValveControl && currentIgnitionState != IDLE)
+        {
+ 
+          Serial.println("Manual valve control detected - interrupting ignition sequence");
+          currentIgnitionState = IDLE;
+          outputState2 = LOW; // Reset output state
+          digitalWrite(ignitionpin, LOW);
+          valve2.close();
+          valve1.close();
+        }
       }
-      // else
-      // {
-      // }
       prevInput3 = currentInput3;
       prevInput4 = currentInput4;
       // Create data packet with 4 bytes to transmit output states
@@ -515,7 +462,7 @@ void TaskCommunication(void *pvParameters)
       dataPacket[2] = outputState1 ? 1 : 0;
       dataPacket[3] = outputState2 ? 1 : 0; // Add the new value
 
-    //serial print the data packet
+          //serial print the data packet
       // Serial.print("Data Packet: ");
       // for (int i = 0; i < 4; i++)
       // {
@@ -527,19 +474,8 @@ void TaskCommunication(void *pvParameters)
       Wire.write(dataPacket, 4); // Now sending 4 bytes
       // byte error = Wire.endTransmission();
       Wire.endTransmission();
-
-      // if (error == 0)
-      // {
-      //   Serial.println("Data sent successfully");
-      // }
-      // else
-      // {
-      //   Serial.print("Error sending data: ");
-      //   Serial.println(error);
-      // }
       xSemaphoreGive(xSerialSemaphore);
     }
-
     vTaskDelay(100 / portTICK_PERIOD_MS); // 1 second delay
   }
 }
