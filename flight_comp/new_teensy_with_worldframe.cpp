@@ -29,7 +29,7 @@ float seaLevelPressure = 1011.3; // Sea level pressure in hPa (customize for you
 // BNO055 variables--------------------------
 Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28);
 // Position tracking variables
-double xPos = 0, yPos = 0, totalAccel = 0;
+double xPos = 0, yPos = 0;
 double xAdjust = 0;
 double yAdjust = 0;
 
@@ -69,6 +69,9 @@ File32 file;
 const int Valve_PIN = 28;
 const int SWITCH_PIN = 29;
 bool Valve_state = false;
+unsigned long valveActivationTime = 0; // Track when valve was activated
+bool valveTimerActive = false; // Track if 3-second timer is running
+
 
 // for time
 unsigned long recordSN = 1; // Serial number for data records
@@ -123,19 +126,6 @@ time_t getTeensy3Time()
   return Teensy3Clock.get();
 }
 
-float analogToPsi(int analogValue)
-{
-  // Convert analog reading (0-4095) to voltage (0-10V)
-  // float voltage = (analogValue * 10.0f) / 4095.0f;
-  // Convert voltage (0-10V) to pressure in bar (0-100 bar)
-  // float pressureBar = (voltage / 10.0f) * 100.0f;
-  // Convert bar to PSI (1 bar = 14.5038 PSI)
-  // float pressurePsi = pressureBar * 14.5038f;
-  float pressureBar = (analogValue * 100.0f) / 4095.0f;
-  // delay(50);
-  return pressureBar;
-}
-
 float analogToCurrent(int analogValue)
 {
   // For 3.3V reference voltage on Teensy
@@ -146,6 +136,21 @@ float analogToCurrent(int analogValue)
   float currentAmps = (voltage - 1.65) / 0.075; // 0.075V/A sensitivity for ACS712-20A
 
   return currentAmps;
+}
+
+float analogToVoltage(int analogValue)
+{
+  // For 3.3V reference voltage on Teensy
+  float measuredVoltage = (analogValue * 3.3) / 4095.0;
+  
+  // Voltage divider scaling factor
+  // If 12V input becomes 3.38V output, the scaling factor is 12/3.38 = 3.55
+  float scalingFactor = 12.0 / 3.38;
+  
+  // Convert back to actual input voltage
+  float actualVoltage = measuredVoltage * scalingFactor;
+  
+  return actualVoltage;
 }
 
 bool writeCSVFile()
@@ -160,7 +165,7 @@ bool writeCSVFile()
   if (file.size() == 0)
   {
     // Replace the existing header line in the writeCSVFile() function
-    file.println("SN,Time,Nano1,Nano2,Nano3,Nano4,ValveState,Current,Pressure,XPosition,YPosition,Altitude,EulerX,EulerY,EulerZ,AccelX,AccelY,AccelZ,GPSLat,GPSLng,TeensyTemp");
+    file.println("SN,Time,remote,valv1,valv2,reast,ignst,parast,Current,Pressure,XPosition,YPosition,Altitude,EulerX,EulerY,EulerZ,AccelX,AccelY,AccelZ,GPSLat,GPSLng,TeensyTemp");
   }
   // Write header and data rows
   String data = String(recordSN++) + "," +
@@ -173,8 +178,8 @@ bool writeCSVFile()
                 Valve_state + "," +
                 analog1 + "," +
                 analog2 + "," +
-                -xPos + "," +
-                -yPos + "," +
+                xPos + "," +
+                yPos + "," +
                 averageAltitude + "," +
                 euler.x() + "," +
                 euler.y() + "," +
@@ -244,6 +249,8 @@ void transmitBinaryData()
     nanoFlags |= 0x04;
   if (nanoValue4)
     nanoFlags |= 0x08;
+  if (remotestate)
+    nanoFlags |= 0x10;
   buffer[index++] = nanoFlags;
 
   // Pack valve state (1 byte)
@@ -258,8 +265,8 @@ void transmitBinaryData()
   index += 4;
 
   // Pack position values (8 bytes)
-  float xp = -xPos;
-  float yp = -yPos;
+  float xp = xPos;
+  float yp = yPos;
   memcpy(&buffer[index], &xp, 4);
   index += 4;
   memcpy(&buffer[index], &yp, 4);
@@ -338,14 +345,14 @@ void task1()
     // Create and write CSV file
     if (nanoValue4)
     {
-      writeCSVFile();
-    }
+    writeCSVFile();
     // if (!writeCSVFile())
     // {
     //   // Serial.println("Will retry file write on next iteration");
     //   // return;
     // }
-    delay(50); // Run every 100 mili second
+    }
+    delay(70); // Run every 100 mili second
   }
 }
 
@@ -353,6 +360,7 @@ void task2()
 {
   bool monitoringAltitude = false;
   float initialAltitude = 0.0f;
+  bool valveHasBeenActivated = false;
 
   while (true)
   {
@@ -361,30 +369,43 @@ void task2()
     {
       monitoringAltitude = true;
       initialAltitude = averageAltitude;
+      valveHasBeenActivated = false;
       Serial.print("Started monitoring altitude. Initial altitude: ");
       Serial.print(initialAltitude);
       Serial.println(" meters");
     }
 
-    // If monitoring is active and altitude has decreased by 5 meters or more, deploy valve
-    if (monitoringAltitude && (initialAltitude - averageAltitude >= 0.2))
+    // If monitoring is active and altitude has decreased by 0.2 meters or more, deploy valve
+    // BUT only if valve hasn't been activated yet in this monitoring session
+    if (monitoringAltitude && !valveHasBeenActivated && (initialAltitude - averageAltitude >= 0.2))
     {
       Valve_state = 1;
-      Serial.print("Altitude decreased by 5+ meters (from ");
+      valveActivationTime = millis(); // Record activation time
+      valveTimerActive = true; // Start the 2.5-second timer
+      valveHasBeenActivated = true; // Mark that valve has been activated
+      Serial.print("Altitude decreased by 0.2+ meters (from ");
       Serial.print(initialAltitude);
       Serial.print(" to ");
       Serial.print(averageAltitude);
       Serial.println("). Valve deployed.");
-      // monitoringAltitude = false; // Stop monitoring after deployment
+    }
+
+        // Check if 3 seconds have passed since valve activation
+    if (valveTimerActive && Valve_state && (millis() - valveActivationTime >= 2500))
+    {
+      Valve_state = 0; // Turn off valve after 3 seconds
+      valveTimerActive = false; // Stop the timer
+      Serial.println("Valve automatically turned off after 2.5 seconds");
     }
 
     digitalWrite(Valve_PIN, Valve_state ? HIGH : LOW);
-    // // Reset monitoring if nanoValue4 becomes 0
-    // if (!nanoValue4 && monitoringAltitude) {
-    //   monitoringAltitude = false;
-    //   Serial.println("Stopped monitoring altitude");
-    // }
 
+    // Reset monitoring if nanoValue4 becomes 0
+    if (!nanoValue4 && monitoringAltitude) {
+      monitoringAltitude = false;
+      valveHasBeenActivated = false; // Reset for next monitoring session
+      Serial.println("Stopped monitoring altitude");
+    }
     delay(100);
   }
 }
@@ -444,7 +465,7 @@ void task3()
     // need to do binary encoding to transmit it
     transmitBinaryData();
 
-    delay(500);
+    delay(100);
   }
 }
 
@@ -467,9 +488,9 @@ void task4_bno055()
                                  linearAccelData.acceleration.z);
 
     // Convert to radians and apply your orientation convention
-    float heading = euler.x() * DEG_2_RAD;
-    float pitch = euler.y() * DEG_2_RAD;
-    float roll = (360.0 - euler.z()) * DEG_2_RAD; // Convert from your 360-roll format
+    float heading = orientationData.orientation.x * DEG_2_RAD;
+    float pitch = orientationData.orientation.y * DEG_2_RAD;
+    float roll = (360.0 - orientationData.orientation.z) * DEG_2_RAD; // Convert from your 360-roll format
 
     // Create rotation matrix components
     float ch = cos(heading);
@@ -479,36 +500,42 @@ void task4_bno055()
     float cr = cos(roll);
     float sr = sin(roll);
 
-    // Rotation matrix for this specific orientation convention
-    float rotMatrix[3][2];
-
-    // Note: This matrix is adjusted for your heading-pitch-roll convention
-    rotMatrix[0][0] = ch * cp;
-    rotMatrix[0][1] = sh * sr - ch * sp * cr;
-    rotMatrix[0][2] = ch * sp * sr + sh * cr;
-
-    rotMatrix[1][0] = sp;
-    rotMatrix[1][1] = cp * cr;
-    rotMatrix[1][2] = -cp * sr;
+    // Only calculate the rotation matrix elements we actually use (for X and Y)
+    float r00 = ch * cp;
+    float r01 = sh * sr - ch * sp * cr;
+    float r02 = ch * sp * sr + sh * cr;
+    float r10 = sp;
+    float r11 = cp * cr;
+    float r12 = -cp * sr;
 
     // Apply rotation to raw accelerometer data
-    worldAccelX = rotMatrix[0][0] * linearAccel.x() +
-                  rotMatrix[0][1] * linearAccel.y() +
-                  rotMatrix[0][2] * linearAccel.z();
-
-    worldAccelY = rotMatrix[1][0] * linearAccel.x() +
-                  rotMatrix[1][1] * linearAccel.y() +
-                  rotMatrix[1][2] * linearAccel.z();
+    worldAccelX = r00 * linearAccel.x() + r01 * linearAccel.y() + r02 * linearAccel.z();
+    worldAccelY = r10 * linearAccel.x() + r11 * linearAccel.y() + r12 * linearAccel.z();
 
     // Calculate position adjustments
     xAdjust = ACCEL_POS_TRANSITION * (worldAccelX * ACCELERATION_SCALE_X);
     yAdjust = ACCEL_POS_TRANSITION * (worldAccelY * ACCELERATION_SCALE_Y);
+    // Serial.println(yAdjust);
+    // float yDeadBand = 0.02; // Adjust based on testing
+    // if (abs(yAdjust) < yDeadBand)
+    // {
+    //   yAdjust = 0;
+    // }
+    // float xDeadBand = 0.01;
+    // if (abs(xAdjust) < xDeadBand)
+    // {
+    //   xAdjust = 0;
+    // }
 
-    // Only update position if adjustment is significant
-    if ((xAdjust + yAdjust > MAXMIN_THRESH) || (xAdjust + yAdjust < MINMIN_THRESH))
+    // Proper magnitude threshold check (using squared values to avoid sqrt)
+    float adjustSquared = xAdjust * xAdjust + yAdjust * yAdjust;
+    float threshSquared = MAXMIN_THRESH * MAXMIN_THRESH;
+
+    // Only update position if adjustment magnitude is significant
+    if (adjustSquared > threshSquared)
     {
-      xPos = xPos + xAdjust; // Note: fixed the calculation to add, not negate
-      yPos = yPos + yAdjust;
+      xPos -= xAdjust;
+      yPos -= yAdjust;
     }
 
     // Calculate heading velocity
@@ -516,15 +543,15 @@ void task4_bno055()
     //             cos(DEG_2_RAD * orientationData.orientation.x);
 
     // Calculate total acceleration
-    totalAccel = sqrt(pow(linearAccel.x(), 2) +
-                      pow(linearAccel.y(), 2) +
-                      pow(linearAccel.z(), 2));
+    // totalAccel = sqrt(pow(linearAccel.x(), 2) +
+    //                   pow(linearAccel.y(), 2) +
+    //                   pow(linearAccel.z(), 2));
 
-    // Apply threshold
-    if (totalAccel < 0.4)
-    {
-      totalAccel = 0;
-    }
+    // // Apply threshold
+    // if (totalAccel < 0.4)
+    // {
+    //   totalAccel = 0;
+    // }
     delay(BNO055_SAMPLERATE_DELAY_MS);
   }
 }
@@ -553,9 +580,16 @@ bool initLoRa()
     return false;
   }
 
-  rf95.setSignalBandwidth(125000);
-  rf95.setCodingRate4(5);
-  rf95.setSpreadingFactor(7);
+  // rf95.setSignalBandwidth(125000);
+  // rf95.setCodingRate4(5);
+  // rf95.setSpreadingFactor(7);
+
+  // for increased range
+  rf95.setSignalBandwidth(125000); // Reduce from 125000 to 62500 Hz
+  rf95.setCodingRate4(5);         // Increase from 5 to 8 (4/8 coding rate)
+  rf95.setSpreadingFactor(9);    // Increase from 7 to 12
+
+  rf95.setModeTx(); // Set to transmit mode
 
   // Set transmitter power (5 to 23 dBm)
   rf95.setTxPower(23, false);
@@ -581,7 +615,7 @@ void adc0_isr()
   case P2:
     // Serial.print("ISR ADC value (P2): ");
     // Serial.println(value);
-    analog2 = analogToPsi(value);
+    analog2 = analogToVoltage(value);
     currentPin = P1;
     adc->adc0->startContinuous(P1);
     break;

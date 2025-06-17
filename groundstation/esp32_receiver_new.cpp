@@ -27,8 +27,12 @@ void decodeReceivedData(uint8_t *buffer, uint8_t len);
 #define REMOTE_PIN 33
 #define VALVE_PIN 13
 
-//store rssi
+// store rssi
 int rssi = 0;
+float snr = 0;
+int frequencyError = 0;
+// unsigned long lastPacketTime = 0;
+// unsigned long packetCount = 0;
 
 void setup()
 {
@@ -67,26 +71,36 @@ void setup()
   Serial.println(RF95_FREQ);
 
   // // Configure LoRa parameters (should match transmitter)
-  rf95.setSignalBandwidth(125000);
-  rf95.setCodingRate4(5);
-  rf95.setSpreadingFactor(7);
+  // rf95.setSignalBandwidth(125000);
+  // rf95.setCodingRate4(5);
+  // rf95.setSpreadingFactor(7);
+
+  rf95.setSignalBandwidth(125000); // Reduce from 125000 to 62500 Hz
+  rf95.setCodingRate4(5);         // Increase from 5 to 8 (4/8 coding rate)
+  rf95.setSpreadingFactor(9);    // Increase from 7 to 12
 
   // For significantly better range
   // rf95.setSpreadingFactor(8);    // Increase from SF7 to SF10
   // rf95.setCodingRate4(5);         // Increase from 4/5 to 4/8
   // rf95.setSignalBandwidth(62500); // Decrease from 125kHz to 62.5kHz
+  // Optional: Set LNA settings for better reception sensitivity
+  // The first parameter sets LNA boost (0 = default, 1 = improved sensitivity)
+  // The second parameter sets LNA gain (0-6, higher = better sensitivity but more current consumption)
+  rf95.spiWrite(RH_RF95_REG_0C_LNA, 0x23); // LNA boost on, max gain
 
   // Set transmit power (this replaces the erroneous setLnaMode line)
-  rf95.setTxPower(23, false);
+  rf95.setModeRx();
 
-    // Configure output pins for nano flags and valve state
+  // rf95.setTxPower(23, false);
+
+  // Configure output pins for nano flags and valve state
   pinMode(NANO1_PIN, OUTPUT);
   pinMode(NANO2_PIN, OUTPUT);
   pinMode(NANO3_PIN, OUTPUT);
   pinMode(NANO4_PIN, OUTPUT);
   pinMode(REMOTE_PIN, OUTPUT);
   pinMode(VALVE_PIN, OUTPUT);
-  
+
   // Initialize all outputs to LOW
   digitalWrite(NANO1_PIN, LOW);
   digitalWrite(NANO2_PIN, LOW);
@@ -96,7 +110,6 @@ void setup()
   digitalWrite(VALVE_PIN, LOW);
 
   Serial.println("Receiver ready!");
-  
 }
 
 void loop()
@@ -112,6 +125,9 @@ void loop()
       // Print RSSI for signal quality monitoring
       // Serial.print("Received packet with RSSI: ");
       rssi = rf95.lastRssi();
+      snr = rf95.lastSNR();
+      frequencyError = rf95.frequencyError();
+
       // Serial.println(rssi, DEC);
 
       // Decode the binary data
@@ -154,7 +170,7 @@ void decodeReceivedData(uint8_t *buffer, uint8_t len)
   float timeValue;
   memcpy(&timeValue, &buffer[index], 4);
   index += 4;
-  
+
   // Convert to readable time string
   int minutes = (int)timeValue;
   int seconds = (int)((timeValue - minutes) * 100 + 0.5);
@@ -220,7 +236,7 @@ void decodeReceivedData(uint8_t *buffer, uint8_t len)
   memcpy(&temperature, &buffer[index], 4);
   index += 4;
 
-    // Set output pins according to received flag values
+  // Set output pins according to received flag values
   digitalWrite(NANO1_PIN, nano1 ? HIGH : LOW);
   digitalWrite(NANO2_PIN, nano2 ? HIGH : LOW);
   digitalWrite(NANO3_PIN, nano3 ? HIGH : LOW);
@@ -271,9 +287,17 @@ void decodeReceivedData(uint8_t *buffer, uint8_t len)
   Serial.print(",");
   Serial.print(gpsLng, 6);
   Serial.print(",");
-  Serial.println(temperature, 2);
-  // Serial.print(",");
-  // Serial.println(rssi);
+  Serial.print(temperature, 2);
+  Serial.print(",");
+  Serial.print(rssi);
+  Serial.print(",");
+  Serial.println(snr);
+  Serial.print("RSSI: ");
+  Serial.print(rssi);
+  Serial.print(", SNR: ");
+  Serial.print(snr);
+  Serial.print(", FreqErr: ");
+  Serial.println(frequencyError);
 
   // Optional: JSON output can be updated similarly if needed
 }

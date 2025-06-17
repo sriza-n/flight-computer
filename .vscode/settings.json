@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "*.tsx": "typescript",
+        "array": "cpp",
+        "string": "cpp",
+        "string_view": "cpp"
+    }
+}
