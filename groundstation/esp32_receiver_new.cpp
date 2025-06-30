@@ -12,7 +12,7 @@
 // MOSI - 23
 
 // RF frequency - must match transmitter
-#define RF95_FREQ 467.5
+#define RF95_FREQ 500
 
 // Initialize LoRa instance
 RH_RF95 rf95(LORA_CS, LORA_INT);

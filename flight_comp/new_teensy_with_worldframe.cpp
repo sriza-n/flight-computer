@@ -96,7 +96,7 @@ bool dataReceived = false;
 #define LORA_INT 8
 
 // RF frequency - set according to your region (915MHz for US, 868MHz for EU)
-#define RF95_FREQ 467.5
+#define RF95_FREQ 500
 
 // Initialize LoRa instance
 RH_RF95 rf95(LORA_CS, LORA_INT);
@@ -377,7 +377,7 @@ void task2()
 
     // If monitoring is active and altitude has decreased by 0.2 meters or more, deploy valve
     // BUT only if valve hasn't been activated yet in this monitoring session
-    if (monitoringAltitude && !valveHasBeenActivated && (initialAltitude - averageAltitude >= 0.2))
+    if (monitoringAltitude && !valveHasBeenActivated && (initialAltitude - averageAltitude >= 0.001))
     {
       Valve_state = 1;
       valveActivationTime = millis(); // Record activation time
@@ -391,7 +391,7 @@ void task2()
     }
 
         // Check if 3 seconds have passed since valve activation
-    if (valveTimerActive && Valve_state && (millis() - valveActivationTime >= 2500))
+    if (valveTimerActive && Valve_state && (millis() - valveActivationTime >= 10000))
     {
       Valve_state = 0; // Turn off valve after 3 seconds
       valveTimerActive = false; // Stop the timer
