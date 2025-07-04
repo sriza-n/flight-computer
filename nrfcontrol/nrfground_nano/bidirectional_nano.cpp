@@ -2,6 +2,8 @@
 #include <SPI.h>
 #include <RF24.h>
 #include <nRF24L01.h>
+// for i2c comm
+#include <Wire.h>
 
 // Nrf configuration
 RF24 radio(9, 10); // CE, CSN
@@ -13,7 +15,9 @@ constexpr uint8_t Ready_PIN = 2;
 constexpr uint8_t IGNITION_PIN = 3;
 constexpr uint8_t SERVO1_DigitalPin = 4;
 constexpr uint8_t SERVO2_DigitalPin = 5;
-constexpr uint8_t Halt_PIN = 6;          // Not used in this example, but can be used for a stop button
+constexpr uint8_t Halt_PIN = 6;
+constexpr uint8_t TestMode_PIN = 7;
+constexpr uint8_t ConfigMode_PIN = 8;
 constexpr uint8_t SERVO1_AnalogPin = 14; // A0
 constexpr uint8_t SERVO2_AnalogPin = 15; // A1
 
@@ -27,34 +31,41 @@ volatile bool servo1State = false;
 volatile bool servo2State = false;
 volatile bool haltState = false;
 volatile bool connectionState = false;
+volatile bool TestMode = false;
+volatile bool ConfigMode = false;
+
+// for i2c comm with esp32
+constexpr uint8_t esp32_I2C_ADDRESS = 0x42;
 
 void setup()
 {
   Serial.begin(9600);
 
+  Wire.begin();
+
   if (!radio.begin())
   {
     Serial.println("Radio hardware not responding");
-    while (1)
-      ; // Stop if the module isn't responding
+    // while (1)
+    //   ; // Stop if the module isn't responding
   }
   if (!radio.isChipConnected())
   {
     Serial.println("nRF24L01 module not connected properly.");
-    while (1)
-      ; // Stop if the module isn't connected
+    // while (1)
+    //   ; // Stop if the module isn't connected
   }
   // Enhanced radio configuration
   radio.setPALevel(RF24_PA_MAX);
   // radio.setDataRate(RF24_2MBPS);
-  radio.setDataRate(RF24_250KBPS); 
+  radio.setDataRate(RF24_250KBPS);
   radio.setChannel(108);
 
   // Enable auto-ack
   radio.enableAckPayload();
   radio.setAutoAck(true);
 
-  radio.setRetries(15, 15);          // Set retries (delay, count)
+  radio.setRetries(15, 15); // Set retries (delay, count)
 
   // Enable dynamic payloads
   // radio.enableDynamicPayloads();
@@ -81,6 +92,8 @@ void transmitPinStates()
   servo1State = digitalRead(SERVO1_DigitalPin);
   servo2State = digitalRead(SERVO2_DigitalPin);
   haltState = digitalRead(Halt_PIN);
+  TestMode = digitalRead(TestMode_PIN);
+  ConfigMode = digitalRead(ConfigMode_PIN);
 
   // Set ignitionState high only if readyState is also high
   ignitionState = readyState && ignitionRaw;
@@ -92,6 +105,8 @@ void transmitPinStates()
   digitalFlags |= (servo1State << 2);   // Bit 2: Servo1 pin
   digitalFlags |= (servo2State << 3);   // Bit 3: Servo2 pin
   digitalFlags |= (haltState << 4);     // Bit 4: Halt pin
+  digitalFlags |= (TestMode << 5);      // Bit 5: Test Mode pin
+  digitalFlags |= (ConfigMode << 6);    // Bit 6: Config Mode pin
   buffer[index++] = digitalFlags;
 
   // Pack servo angles as 16-bit integers (2 bytes each)
@@ -113,23 +128,11 @@ void transmitPinStates()
 
   if (success)
   {
-    Serial.print(readyState);
-    Serial.print(",");
-    Serial.print(ignitionState);
-    Serial.print(",");
-    Serial.print(servo1State);
-    Serial.print(",");
-    Serial.print(servo2State);
-    Serial.print(",");
-    Serial.print(haltState);
-    Serial.print(",");
-    Serial.print(servo1Angle);
-    Serial.print(",");
-    Serial.println(servo2Angle);
+    connectionState = true;
   }
   else
   {
-    Serial.println("Failed to transmit binary pin states");
+    connectionState = false;
   }
 
   radio.startListening(); // Return to listening mode
@@ -167,39 +170,39 @@ void readServoAngles()
   Serial.println(connectionState);
 }
 
-// Function to check and update connection state with receiver
-void checkConnectionState()
-{
-  // Send a ping packet to check receiver connection
-  radio.stopListening();
-  uint8_t pingData = 0xFF; // Ping byte
-  bool success = radio.write(&pingData, 1);
+// // Function to check and update connection state with receiver
+// void checkConnectionState()
+// {
+//   // Send a ping packet to check receiver connection
+//   radio.stopListening();
+//   uint8_t pingData = 0xFF; // Ping byte
+//   bool success = radio.write(&pingData, 1);
 
-  if (success)
-  {
-    // Wait for acknowledgment with timeout
-    radio.startListening();
-    unsigned long startTime = millis();
-    bool ackReceived = false;
+//   if (success)
+//   {
+//     // Wait for acknowledgment with timeout
+//     radio.startListening();
+//     unsigned long startTime = millis();
+//     bool ackReceived = false;
 
-    while (millis() - startTime < 100) // 100ms timeout
-    {
-      if (radio.available())
-      {
-        uint8_t ackData;
-        radio.read(&ackData, 1);
-        ackReceived = true;
-        break;
-      }
-    }
-    connectionState = ackReceived;
-  }
-  else
-  {
-    connectionState = false;
-    radio.startListening();
-  }
-}
+//     while (millis() - startTime < 100) // 100ms timeout
+//     {
+//       if (radio.available())
+//       {
+//         uint8_t ackData;
+//         radio.read(&ackData, 1);
+//         ackReceived = true;
+//         break;
+//       }
+//     }
+//     connectionState = ackReceived;
+//   }
+//   else
+//   {
+//     connectionState = false;
+//     radio.startListening();
+//   }
+// }
 
 // Main loop
 void loop()
@@ -208,5 +211,24 @@ void loop()
   // read servo angle
   readServoAngles();
   transmitPinStates();
+  // --- I2C Data Packet ---
+  uint8_t dataPacket[5] = {
+      static_cast<uint8_t>(servo1Angle),
+      static_cast<uint8_t>(servo2Angle),
+      static_cast<uint8_t>(ConfigMode),
+      static_cast<uint8_t>(TestMode),
+      static_cast<uint8_t>(connectionState), 
+  };
+
+  // serial print the data packet
+  Serial.print("Data Packet: ");
+  for (int i = 0; i < 5; i++)
+  {
+    Serial.println(dataPacket[i]);
+  }
+
+  Wire.beginTransmission(esp32_I2C_ADDRESS);
+  Wire.write(dataPacket, 5);
+  Wire.endTransmission();
   delay(100);
 }

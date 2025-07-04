@@ -16,7 +16,7 @@
 #define RF95_FREQ 500
 
 // WiFi configuration
-#define AP_SSID "FlightComputer-Config"
+#define AP_SSID "GroundStation📥-Config"
 #define AP_PASSWORD "logger1234"
 #define WIFI_TIMEOUT 10000 // 10 seconds
 #define DNS_PORT 53

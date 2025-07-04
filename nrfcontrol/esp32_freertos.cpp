@@ -40,7 +40,7 @@ volatile bool Servo1State = false;
 volatile bool Servo2State = false;
 
 // --- Previous Input States ---
-uint8_t prevInput1 = LOW, prevInput2 = LOW, prevInput3 = LOW, prevInput4 = LOW;
+// uint8_t prevInput1 = LOW, prevInput2 = LOW, prevInput3 = LOW, prevInput4 = LOW;
 
 // --- Servo Angles ---
 uint16_t servo1Angle = 180;
@@ -73,12 +73,16 @@ class Valve
   Servo servo;
   uint8_t pin;
   int angle = 0;
+  int targetAngle = 0;
   bool opened = false;
+  bool moving = false;
+  unsigned long lastMoveTime = 0;
   const uint8_t step = 1;
-  const uint8_t delayMs = 20;
+  const uint8_t delayMs = 1;
 
 public:
   Valve(uint8_t p) : pin(p) {}
+
   void begin()
   {
     servo.attach(pin);
@@ -86,33 +90,59 @@ public:
     servo.write(0);
     opened = false;
   }
+
   void open()
   {
-    if (opened)
+    if (opened && !moving)
       return;
-    for (int a = angle; a <= 180; a += step)
-    {
-      servo.write(a);
-      vTaskDelay(delayMs / portTICK_PERIOD_MS);
-    }
-    angle = 180;
+    targetAngle = 180;
+    moving = true;
     opened = true;
-    servo.write(angle);
   }
+
   void close()
   {
-    if (!opened)
+    if (!opened && !moving)
       return;
-    for (int a = angle; a >= 0; a -= step)
-    {
-      servo.write(a);
-      vTaskDelay(delayMs / portTICK_PERIOD_MS);
-    }
-    angle = 0;
+    targetAngle = 0;
+    moving = true;
     opened = false;
-    servo.write(angle);
   }
+
+  // Call this regularly to update valve position
+  void update()
+  {
+    if (!moving)
+      return;
+
+    unsigned long currentTime = millis();
+    if (currentTime - lastMoveTime >= delayMs)
+    {
+      if (angle < targetAngle)
+      {
+        angle += step;
+        if (angle > targetAngle)
+          angle = targetAngle;
+      }
+      else if (angle > targetAngle)
+      {
+        angle -= step;
+        if (angle < targetAngle)
+          angle = targetAngle;
+      }
+
+      servo.write(angle);
+      lastMoveTime = currentTime;
+
+      if (angle == targetAngle)
+      {
+        moving = false;
+      }
+    }
+  }
+
   bool isOpen() const { return opened; }
+  bool isMoving() const { return moving; }
 };
 
 Valve valve1(VALVE1_SERVO_PIN), valve2(VALVE2_SERVO_PIN);
@@ -333,40 +363,47 @@ void RadioCmdTask(void *pvParameters)
         }
       }
     }
-      // --- Ignition State Machine --- (runs independently of masterStateHigh)
-      switch (ignitionStateMachine)
+    valve1.update();
+    valve2.update();
+    // --- Ignition State Machine --- (runs independently of masterStateHigh)
+    switch (ignitionStateMachine)
+    {
+    case IgnitionState::IGNITION_ON:
+      if (millis() - ignitionStartTime >= 1000)
       {
-      case IgnitionState::IGNITION_ON:
-        if (millis() - ignitionStartTime >= 1000)
-        {
-          valve1.open();
-          valve2.open();
-          ignitionStateMachine = IgnitionState::VALVES_OPENING;
-        }
-        break;
-      case IgnitionState::VALVES_OPENING:
+        valve1.open();
+        valve2.open();
+        ignitionStateMachine = IgnitionState::VALVES_OPENING;
+      }
+      break;
+    case IgnitionState::VALVES_OPENING:
+      // Wait until both valves finish moving
+      if (!valve1.isMoving() && !valve2.isMoving())
+      {
         ignitionStateMachine = IgnitionState::WAITING;
         ignitionStartTime = millis();
-        break;
-      case IgnitionState::WAITING:
-        if (millis() - ignitionStartTime >= 15000)
-        {
-          ignitionStateMachine = IgnitionState::VALVES_CLOSING;
-        }
-        break;
-      case IgnitionState::VALVES_CLOSING:
-        valve1.close();
-        valve2.close();
-        ignitionStateMachine = IgnitionState::COMPLETE;
-        break;
-      case IgnitionState::COMPLETE:
-        digitalWrite(IGNITION_PIN, LOW);
-        ignitionStateMachine = IgnitionState::IDLE;
-        break;
-      case IgnitionState::IDLE:
-      default:
-        break;
       }
+      break;
+    case IgnitionState::WAITING:
+      if (millis() - ignitionStartTime >= 15000)
+      {
+        ignitionStateMachine = IgnitionState::VALVES_CLOSING;
+      }
+      break;
+    case IgnitionState::VALVES_CLOSING:
+      valve1.close();
+      valve2.close();
+      ignitionStateMachine = IgnitionState::COMPLETE;
+      break;
+    case IgnitionState::COMPLETE:
+      outputState2 = true;
+      digitalWrite(IGNITION_PIN, LOW);
+      ignitionStateMachine = IgnitionState::IDLE;
+      break;
+    case IgnitionState::IDLE:
+    default:
+      break;
+    }
 
     vTaskDelay(xDelay);
   }
@@ -379,14 +416,13 @@ void ValveI2CTask(void *pvParameters)
   for (;;)
   {
 
-    int curInput3 = Servo1State;
-    int curInput4 = Servo2State;
+
     manualValveControl = false;
 
-    if (masterStateHigh)
+    if (masterStateHigh && ignitionStateMachine == IgnitionState::IDLE)
     {
       // HOLDING SWITCH LOGIC: Act while switch is held HIGH
-      if (curInput3 == HIGH)
+      if (Servo1State == HIGH)
       {
         if (!valve1.isOpen())
         {
@@ -405,7 +441,7 @@ void ValveI2CTask(void *pvParameters)
         }
       }
 
-      if (curInput4 == HIGH)
+      if (Servo2State == HIGH)
       {
         if (!valve2.isOpen())
         {
@@ -433,8 +469,6 @@ void ValveI2CTask(void *pvParameters)
         valve2.close();
       }
     }
-    prevInput3 = curInput3;
-    prevInput4 = curInput4;
 
     // --- I2C Data Packet ---
     uint8_t dataPacket[5] = {

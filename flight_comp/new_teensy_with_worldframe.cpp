@@ -89,6 +89,8 @@ bool nanoValue3 = false;
 bool nanoValue4 = false;
 unsigned long lastReceiveTime = 0;
 bool dataReceived = false;
+bool testmode = false;
+unsigned long para_height = 5;
 
 // Pin definitions for LoRa
 #define LORA_CS 10
@@ -201,22 +203,31 @@ bool writeCSVFile()
 // Function to handle I2C receive events
 void receiveEvent(int numBytes)
 {
-  if (numBytes == 5)
-  { // Now expecting 4 bytes
-    byte dataPacket[5];
+  if (numBytes == 7)
+  { 
+    byte dataPacket[7];
 
-    // Read all bytes into buffer
-    for (int i = 0; i < 5; i++)
+    unsigned long startTime = millis();
+    for (int i = 0; i < 7; i++)
     {
-      dataPacket[i] = Wire2.read();
+      while (!Wire2.available() && (millis() - startTime < 10)) {
+        // Wait up to 10ms for data
+      }
+      if (Wire2.available()) {
+        dataPacket[i] = Wire2.read();
+      } else {
+        Serial.println("I2C timeout");
+        return;
+      }
     }
-
     // Convert to boolean values
     nanoValue1 = (dataPacket[0] > 0);
     nanoValue2 = (dataPacket[1] > 0);
     nanoValue3 = (dataPacket[2] > 0);
     nanoValue4 = (dataPacket[3] > 0); // Handle the new value
     remotestate = (dataPacket[4] > 0);
+    testmode = (dataPacket[5] > 0);
+    para_height = dataPacket[6];
 
     dataReceived = true;
     lastReceiveTime = millis();
@@ -377,7 +388,7 @@ void task2()
 
     // If monitoring is active and altitude has decreased by 0.2 meters or more, deploy valve
     // BUT only if valve hasn't been activated yet in this monitoring session
-    if (monitoringAltitude && !valveHasBeenActivated && (initialAltitude - averageAltitude >= 0.001))
+    if (monitoringAltitude && !valveHasBeenActivated && (initialAltitude - averageAltitude >= para_height))
     {
       Valve_state = 1;
       valveActivationTime = millis(); // Record activation time
@@ -711,6 +722,7 @@ void setup()
   }
 
   // receive data from nano
+  Wire2.setClock(100000); // 100kHz instead of default 400kHz
   Wire2.begin(0x42); // Initialize as slave with address 0x42
   Wire2.onReceive(receiveEvent);
   Serial.println("Teensy I2C Slave initialized on Wire2");

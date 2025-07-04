@@ -63,12 +63,16 @@ class Valve
   Servo servo;
   uint8_t pin;
   int angle = 0;
+  int targetAngle = 0;
   bool opened = false;
+  bool moving = false;
+  unsigned long lastMoveTime = 0;
   const uint8_t step = 1;
-  const uint8_t delayMs = 20;
+  const uint8_t delayMs = 1;
 
 public:
   Valve(uint8_t p) : pin(p) {}
+
   void begin()
   {
     servo.attach(pin);
@@ -76,33 +80,59 @@ public:
     servo.write(0);
     opened = false;
   }
+
   void open()
   {
-    if (opened)
+    if (opened && !moving)
       return;
-    for (int a = angle; a <= 180; a += step)
-    {
-      servo.write(a);
-      vTaskDelay(delayMs / portTICK_PERIOD_MS);
-    }
-    angle = 180;
+    targetAngle = 180;
+    moving = true;
     opened = true;
-    servo.write(angle);
   }
+
   void close()
   {
-    if (!opened)
+    if (!opened && !moving)
       return;
-    for (int a = angle; a >= 0; a -= step)
-    {
-      servo.write(a);
-      vTaskDelay(delayMs / portTICK_PERIOD_MS);
-    }
-    angle = 0;
+    targetAngle = 0;
+    moving = true;
     opened = false;
-    servo.write(angle);
   }
+
+  // Call this regularly to update valve position
+  void update()
+  {
+    if (!moving)
+      return;
+
+    unsigned long currentTime = millis();
+    if (currentTime - lastMoveTime >= delayMs)
+    {
+      if (angle < targetAngle)
+      {
+        angle += step;
+        if (angle > targetAngle)
+          angle = targetAngle;
+      }
+      else if (angle > targetAngle)
+      {
+        angle -= step;
+        if (angle < targetAngle)
+          angle = targetAngle;
+      }
+
+      servo.write(angle);
+      lastMoveTime = currentTime;
+
+      if (angle == targetAngle)
+      {
+        moving = false;
+      }
+    }
+  }
+
   bool isOpen() const { return opened; }
+  bool isMoving() const { return moving; }
 };
 
 Valve valve1(VALVE1_SERVO_PIN), valve2(VALVE2_SERVO_PIN);
@@ -185,8 +215,11 @@ void TaskSensorRead(void *)
 {
   for (;;)
   {
-    if (xSemaphoreTake(xSerialSemaphore, 10) == pdTRUE)
+    if (xSemaphoreTake(xSerialSemaphore, 15) == pdTRUE)
     {
+      // Update valves continuously
+      valve1.update();
+      valve2.update();
       int curInput1 = digitalRead(INPUT_PIN1);
       int curInput2 = digitalRead(INPUT_PIN2);
 
@@ -219,7 +252,8 @@ void TaskSensorRead(void *)
       {
         // Instead of turning off ignition immediately, we only power down if not in the ignition sequence
         if (ignitionStateMachine == IgnitionState::IDLE)
-        { outputState1 = false;
+        {
+          outputState1 = false;
           digitalWrite(IGNITION_PIN, LOW);
           if (!outputState2)
           {
@@ -243,8 +277,12 @@ void TaskSensorRead(void *)
         }
         break;
       case IgnitionState::VALVES_OPENING:
-        ignitionStateMachine = IgnitionState::WAITING;
-        ignitionStartTime = millis();
+        // Wait until both valves finish moving
+        if (!valve1.isMoving() && !valve2.isMoving())
+        {
+          ignitionStateMachine = IgnitionState::WAITING;
+          ignitionStartTime = millis();
+        }
         break;
       case IgnitionState::WAITING:
         if (millis() - ignitionStartTime >= 15000)
@@ -267,7 +305,7 @@ void TaskSensorRead(void *)
       }
       xSemaphoreGive(xSerialSemaphore);
     }
-    vTaskDelay(40 / portTICK_PERIOD_MS);
+    vTaskDelay(20 / portTICK_PERIOD_MS);
   }
 }
 
@@ -276,7 +314,7 @@ void TaskCommunication(void *)
 {
   for (;;)
   {
-    if (xSemaphoreTake(xSerialSemaphore, 10) == pdTRUE)
+    if (xSemaphoreTake(xSerialSemaphore, 25) == pdTRUE)
     {
       int curInput3 = digitalRead(INPUT_PIN3);
       int curInput4 = digitalRead(INPUT_PIN4);
@@ -336,6 +374,6 @@ void TaskCommunication(void *)
 
       xSemaphoreGive(xSerialSemaphore);
     }
-    vTaskDelay(105 / portTICK_PERIOD_MS);
+    vTaskDelay(400 / portTICK_PERIOD_MS);
   }
 }
