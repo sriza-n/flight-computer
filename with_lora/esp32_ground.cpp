@@ -455,10 +455,12 @@ void handleConfigSubmit()
     // Check if this is a new network or just updating settings
     bool isNewNetwork = (ssid != currentSSID);
 
-        // Validate frequency range
-    if (loraFreq.length() > 0) {
+    // Validate frequency range
+    if (loraFreq.length() > 0)
+    {
         float freq = loraFreq.toFloat();
-        if (freq < 410.0 || freq > 525.0) {
+        if (freq < 410.0 || freq > 525.0)
+        {
             server.send(400, "text/plain", "Frequency must be between 410-525 MHz");
             return;
         }
@@ -595,11 +597,11 @@ void decodeReceivedData(uint8_t *buffer, uint8_t len)
     index += 4;
 
     // Single printf call instead of 20+ Serial.print() calls
-    Serial.printf("%d,%d,%d,%d,%d,%u,%s,%d,%d,%d,%d,%d,%.2f,%.2f,%d,%.1f,",
-                  servo1Angle, servo2Angle, ConfigMode ? 1 : 0, TestMode ? 1 : 0,
-                  connectionState ? 1 : 0, sn, timeStr.c_str(),
-                  remotestate ? 1 : 0, nano1 ? 1 : 0, nano2 ? 1 : 0, nano3 ? 1 : 0,
-                  nano4 ? 1 : 0, analog1, analog2, rssi, snr);
+    // Serial.printf("%d,%d,%d,%d,%d,%u,%s,%d,%d,%d,%d,%d,%.2f,%.2f,%d,%.1f,",
+    //               servo1Angle, servo2Angle, ConfigMode ? 1 : 0, TestMode ? 1 : 0,
+    //               connectionState ? 1 : 0, sn, timeStr.c_str(),
+    //               remotestate ? 1 : 0, nano1 ? 1 : 0, nano2 ? 1 : 0, nano3 ? 1 : 0,
+    //               nano4 ? 1 : 0, analog1, analog2, rssi, snr);
 
     if (TestMode)
     {
@@ -609,7 +611,7 @@ void decodeReceivedData(uint8_t *buffer, uint8_t len)
         index += 4;
         memcpy((void *)&weight, &buffer[index], 4);
         index += 4;
-        Serial.printf("%.2f,%.2f,%.4f\n", p1Value, p2Value, weight);
+        // Serial.printf("%.2f,%.2f,%.4f\n", p1Value, p2Value, weight);
     }
     else
     {
@@ -638,10 +640,18 @@ void decodeReceivedData(uint8_t *buffer, uint8_t len)
             index += 4;
         }
 
-        Serial.printf("%d,%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,%.4f,%.6f,%.6f\n",
-                      valveState ? 1 : 0, xPos, yPos, altitude, eulerX, eulerY, eulerZ,
-                      totalAccel, gpsLat, gpsLng);
+        //     Serial.printf("%d,%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,%.4f,%.6f,%.6f\n",
+        //                   valveState ? 1 : 0, xPos, yPos, altitude, eulerX, eulerY, eulerZ,
+        //                   totalAccel, gpsLat, gpsLng);
     }
+    Serial.printf("%u,%s,%d,%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,%.4f,%.6f,%.6f,%d,%.1f,%.2f,%.2f,%.4f,%d,%d,%d,%d,%d\n",
+                  sn, timeStr.c_str(),
+                  remotestate ? 1 : 0, nano1 ? 1 : 0, nano2 ? 1 : 0, nano3 ? 1 : 0,
+                  nano4 ? 1 : 0, valveState ? 1 : 0, analog1, analog2,
+                  xPos, yPos, altitude, eulerX, eulerY, eulerZ,
+                  totalAccel, gpsLat, gpsLng, rssi, snr, p1Value, p2Value, weight,
+                  servo1Angle, servo2Angle, ConfigMode ? 1 : 0, TestMode ? 1 : 0,
+                  connectionState ? 1 : 0);
 
     // Set output pins...
     digitalWrite(NANO1_PIN, nano1 ? HIGH : LOW);

@@ -30,13 +30,13 @@ constexpr uint8_t VALVE2_SERVO_PIN = 14;
 constexpr uint8_t TEENSY_POWER_PIN = 15;
 
 // --- Configurable parameters ---
-unsigned long ignitionOnDelay = 1000;    // Default 1 second
+unsigned long ignitionOnDelay = 1000;       // Default 1 second
 unsigned long ignitionWaitingDelay = 15000; // Default 15 seconds
-unsigned long parsuitedeploy = 5; // 5 meter change in altitude to deploy parachute
+unsigned long parsuitedeploy = 5;           // 5 meter change in altitude to deploy parachute
 
 // WiFi and WebServer settings
-const char* ssid = "RocketConfig🚀";
-const char* password = "rocket1234";
+const char *ssid = "RocketConfig🚀";
+const char *password = "rocket1234";
 WebServer server(80);
 Preferences preferences;
 
@@ -77,7 +77,6 @@ void ValveI2CTask(void *pvParameters);
 void RadioCmdTask(void *pvParameters);
 void WiFiServerTask(void *pvParameters);
 
-
 // // --- Utility Functions ---
 inline void Buzz(uint8_t cycles = 1, uint16_t highTime = 100, uint16_t lowTime = 100)
 {
@@ -92,9 +91,10 @@ inline void Buzz(uint8_t cycles = 1, uint16_t highTime = 100, uint16_t lowTime =
 }
 
 // Play a tone on the buzzer
-void playTone(uint16_t frequency, uint16_t durationMs) {
+void playTone(uint16_t frequency, uint16_t durationMs)
+{
   tone(BUZZER_PIN, frequency, durationMs);
-  delay(durationMs); // Wait for tone to finish
+  delay(durationMs);  // Wait for tone to finish
   noTone(BUZZER_PIN); // Ensure buzzer is off
 }
 // --- Ignition State Machine ---
@@ -129,7 +129,7 @@ public:
   void begin()
   {
     servo.attach(pin);
-    angle = 0;           
+    angle = 0;
     targetAngle = 180;
     servo.write(angle);
     opened = false;
@@ -143,7 +143,8 @@ public:
   }
 
   void open(int angleValue)
-  { Buzz(1, 500, 0);
+  {
+    Buzz(1, 500, 0);
     if (opened && !moving)
       return;
     setTargetAngle(angleValue);
@@ -151,7 +152,7 @@ public:
   }
 
   void close()
-  { 
+  {
     if (!opened && !moving)
       return;
     setTargetAngle(0);
@@ -162,7 +163,8 @@ public:
   void update(int desiredAngle)
   {
     // Only allow real-time update if valve is open
-    if (opened && targetAngle != desiredAngle) {
+    if (opened && targetAngle != desiredAngle)
+    {
       setTargetAngle(desiredAngle);
     }
 
@@ -201,9 +203,8 @@ public:
 
 Valve valve1(VALVE1_SERVO_PIN), valve2(VALVE2_SERVO_PIN);
 
-
-
-void loadPreferences() {
+void loadPreferences()
+{
   preferences.begin("rocket-config", false);
   ignitionOnDelay = preferences.getULong("ignOnDelay", 1000);
   ignitionWaitingDelay = preferences.getULong("ignWaitDelay", 15000);
@@ -211,16 +212,17 @@ void loadPreferences() {
   preferences.end();
 }
 
-void savePreferences() {
+void savePreferences()
+{
   preferences.begin("rocket-config", false);
   preferences.putULong("ignOnDelay", ignitionOnDelay);
   preferences.putULong("ignWaitDelay", ignitionWaitingDelay);
   preferences.putULong("parsuitedeploy", parsuitedeploy);
   preferences.end();
-  
 }
 
-void handleRoot() {
+void handleRoot()
+{
   String html = "<!DOCTYPE html><html><head><title>Rocket Configuration</title>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
   html += "<style>body{font-family:Arial;margin:20px;} .form-group{margin-bottom:15px;} ";
@@ -253,26 +255,30 @@ void handleRoot() {
   html += "<p>Current Parachute Deploy Altitude Change: " + String(parsuitedeploy) + " m</p>";
   html += "<script>setTimeout(function(){location.reload()},5000);</script>";
   html += "</body></html>";
-  
+
   server.send(200, "text/html", html);
 }
 
-void handleSave() {
-  if (server.hasArg("ignDelay") && server.hasArg("waitDelay")) {
+void handleSave()
+{
+  if (server.hasArg("ignDelay") && server.hasArg("waitDelay"))
+  {
     ignitionOnDelay = server.arg("ignDelay").toInt();
     ignitionWaitingDelay = server.arg("waitDelay").toInt();
     parsuitedeploy = server.arg("parsuitedeploy").toInt();
-    
+
     // Apply limits
     ignitionOnDelay = constrain(ignitionOnDelay, 500, 10000);
     ignitionWaitingDelay = constrain(ignitionWaitingDelay, 1000, 90000);
     parsuitedeploy = constrain(parsuitedeploy, 1, 100); // Limit parachute deploy to 1-100 meters
-    
+
     savePreferences();
-    
+
     server.sendHeader("Location", "/");
     server.send(303);
-  } else {
+  }
+  else
+  {
     server.send(400, "text/plain", "Missing parameters");
   }
 }
@@ -280,10 +286,10 @@ void handleSave() {
 void setup()
 {
   Serial.begin(115200);
-  
+
   // Load saved preferences
   loadPreferences();
-  
+
   if (!radio.begin())
   {
     Serial.println("Radio hardware not responding");
@@ -324,6 +330,8 @@ void setup()
   valve1.begin();
   valve2.begin();
 
+  
+  Wire.setClock(100000); // 100kHz instead of default 400kHz
   Wire.begin();
 
   // Create ValveI2CTask
@@ -350,14 +358,13 @@ void setup()
   xTaskCreate(
       WiFiServerTask,       // Task function
       "WiFiServerTask",     // Task name
-      4096,                // Stack size (bytes)
-      NULL,               // Parameters
-      3,                  // Priority
+      4096,                 // Stack size (bytes)
+      NULL,                 // Parameters
+      3,                    // Priority
       &WiFiServerTaskHandle // Task handle
   );
 
   Serial.println("FreeRTOS tasks created successfully");
-
 }
 
 void loop()
@@ -401,8 +408,8 @@ void RadioCmdTask(void *pvParameters)
         Servo1State = (digitalFlags & 0x04) != 0;   // Bit 2
         Servo2State = (digitalFlags & 0x08) != 0;   // Bit 3
         haltState = (digitalFlags & 0x10) != 0;     // Bit 4
-        TestMode = (digitalFlags & 0x20) != 0; // Bit 5
-        ConfigMode = (digitalFlags & 0x40) != 0; // Bit 6
+        TestMode = (digitalFlags & 0x20) != 0;      // Bit 5
+        ConfigMode = (digitalFlags & 0x40) != 0;    // Bit 6
 
         // Extract servo angles (2 bytes each)
         // int16_t servo1Angle, servo2Angle;
@@ -410,8 +417,6 @@ void RadioCmdTask(void *pvParameters)
         index += 2;
         memcpy(&servo2Angle, &buffer[index], 2);
         index += 2;
-
-
       }
 
       // Serial.print(readyState);
@@ -433,11 +438,11 @@ void RadioCmdTask(void *pvParameters)
 
     // Set masterStateHigh true if radio.available() in last 500ms, else false
     if (millis() - lastRadioAvailableTime <= 500)
-    { 
+    {
       masterStateHigh = true;
     }
     else
-    { 
+    {
       masterStateHigh = false;
     }
 
@@ -458,7 +463,7 @@ void RadioCmdTask(void *pvParameters)
       else
       {
         if (outputState1)
-        { 
+        {
           outputState1 = false;
         }
       }
@@ -539,58 +544,61 @@ void WiFiServerTask(void *pvParameters)
 {
   const TickType_t xDelay = pdMS_TO_TICKS(100); // 100ms delay
   bool wifiActive = false;
-  
+
   // Initially turn off WiFi
   WiFi.mode(WIFI_OFF);
-  
+
   for (;;)
   {
     // Check if halt state has changed
-    if (ConfigMode && !wifiActive) {
+    if (ConfigMode && !wifiActive)
+    {
       // Activate WiFi only when halt state becomes HIGH
       WiFi.mode(WIFI_AP);
       WiFi.softAP(ssid, password);
-      
+
       Serial.print("HALT detected: Access Point started: ");
       Serial.println(ssid);
       Serial.print("IP address: ");
       Serial.println(WiFi.softAPIP());
 
       dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
-      
+
       // Setup server routes
-      server.on("/", handleRoot);           // Root page
-      server.on("/config", handleRoot);     // Config page
+      server.on("/", handleRoot);       // Root page
+      server.on("/config", handleRoot); // Config page
       server.on("/save", HTTP_POST, handleSave);
-      server.onNotFound(handleRoot);          // Catch all other requests
-      
+      server.onNotFound(handleRoot); // Catch all other requests
+
       // Start server
       server.begin();
       Serial.println("HTTP server started");
-      
+
       // Buzz to indicate WiFi is now active
       // Buzz(1, 500, 0);
-      
+
       wifiActive = true;
     }
-    else if (!ConfigMode && wifiActive) {
+    else if (!ConfigMode && wifiActive)
+    {
       // Deactivate WiFi when halt state becomes LOW
       server.close();
       dnsServer.stop();
       WiFi.disconnect(true);
       WiFi.mode(WIFI_OFF);
-      
+
       Serial.println("HALT deactivated: WiFi Access Point stopped");
-      
+
       wifiActive = false;
     }
-    
+
     // Only handle client requests when WiFi is active
-    if (wifiActive) {
+    if (wifiActive)
+    {
       dnsServer.processNextRequest();
       server.handleClient();
     }
-    
+
     vTaskDelay(xDelay);
   }
 }
@@ -653,7 +661,6 @@ void ValveI2CTask(void *pvParameters)
         static_cast<uint8_t>(outputState2),
         static_cast<uint8_t>(masterStateHigh),
         static_cast<uint8_t>(TestMode),
-        // Add parachute deploy altitude change as the last byte
         static_cast<uint8_t>(parsuitedeploy),
     };
 
@@ -667,6 +674,15 @@ void ValveI2CTask(void *pvParameters)
     Wire.beginTransmission(TEENSY_I2C_ADDRESS);
     Wire.write(dataPacket, 7);
     Wire.endTransmission();
+
+        // Add error checking
+    // if (result != 0) {
+    //   Serial.print("I2C transmission failed, error code: ");
+    //   Serial.println(result);
+    // } else if (bytesWritten != 7) {
+    //   Serial.print("Expected to write 7 bytes, actually wrote: ");
+    //   Serial.println(bytesWritten);
+    // }
 
     vTaskDelay(xDelay);
   }

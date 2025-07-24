@@ -270,17 +270,20 @@ void handleRoot()
     html += "<div class=\"section\">"
             "<h2>Engine Configuration</h2>"
             "<label for=\"ignDelay\">Valve Open Delay (ms):</label>"
-            "<input type=\"number\" id=\"ignDelay\" name=\"ignDelay\" value=\"" + String(ignitionOnDelay) + "\" min=\"500\" max=\"10000\">"
-            "<small>Time delay before valves open after ignition (500-10000ms)</small>"
+            "<input type=\"number\" id=\"ignDelay\" name=\"ignDelay\" value=\"" +
+            String(ignitionOnDelay) + "\" min=\"500\" max=\"10000\">"
+                                      "<small>Time delay before valves open after ignition (500-10000ms)</small>"
 
-            "<label for=\"waitDelay\">Valve Open Duration (ms):</label>"
-            "<input type=\"number\" id=\"waitDelay\" name=\"waitDelay\" value=\"" + String(ignitionWaitingDelay) + "\" min=\"1000\" max=\"90000\">"
-            "<small>How long valves stay open during ignition (1000-90000ms)</small>"
+                                      "<label for=\"waitDelay\">Valve Open Duration (ms):</label>"
+                                      "<input type=\"number\" id=\"waitDelay\" name=\"waitDelay\" value=\"" +
+            String(ignitionWaitingDelay) + "\" min=\"1000\" max=\"90000\">"
+                                           "<small>How long valves stay open during ignition (1000-90000ms)</small>"
 
-            "<label for=\"parsuitedeploy\">Parachute Deploy Altitude Change (m):</label>"
-            "<input type=\"number\" id=\"parsuitedeploy\" name=\"parsuitedeploy\" value=\"" + String(parsuitedeploy) + "\" min=\"0\" max=\"100\">"
-            "<small>Altitude change threshold for parachute deployment (0-100m)</small>"
-            "</div>";
+                                           "<label for=\"parsuitedeploy\">Parachute Deploy Altitude Change (m):</label>"
+                                           "<input type=\"number\" id=\"parsuitedeploy\" name=\"parsuitedeploy\" value=\"" +
+            String(parsuitedeploy) + "\" min=\"0\" max=\"100\">"
+                                     "<small>Altitude change threshold for parachute deployment (0-100m)</small>"
+                                     "</div>";
 
     // LoRa Configuration Section
     html += "<div class=\"section\">"
@@ -288,42 +291,64 @@ void handleRoot()
             "<div class=\"warning\">&#9888;&#65039; Changing LoRa settings requires restart. Ensure transmitter uses same settings!</div>"
 
             "<label for=\"lora_freq\">Frequency (MHz):</label>"
-            "<input type=\"number\" id=\"lora_freq\" name=\"lora_freq\" min=\"410\" max=\"525\" step=\"0.1\" value=\"" + String(loraFreq) + "\">"
-            "<small>Valid range: 410-525 MHz</small>"
+            "<input type=\"number\" id=\"lora_freq\" name=\"lora_freq\" min=\"410\" max=\"525\" step=\"0.1\" value=\"" +
+            String(loraFreq) + "\">"
+                               "<small>Valid range: 410-525 MHz</small>"
 
-            "<label for=\"lora_bw\">Signal Bandwidth (Hz):</label>"
-            "<select id=\"lora_bw\" name=\"lora_bw\">"
-            "<option value=\"7800\"" + String(loraBandwidth == 7800 ? " selected" : "") + ">7.8 kHz (Max Range)</option>"
-            "<option value=\"10400\"" + String(loraBandwidth == 10400 ? " selected" : "") + ">10.4 kHz</option>"
-            "<option value=\"15600\"" + String(loraBandwidth == 15600 ? " selected" : "") + ">15.6 kHz</option>"
-            "<option value=\"20800\"" + String(loraBandwidth == 20800 ? " selected" : "") + ">20.8 kHz</option>"
-            "<option value=\"31250\"" + String(loraBandwidth == 31250 ? " selected" : "") + ">31.25 kHz</option>"
-            "<option value=\"41700\"" + String(loraBandwidth == 41700 ? " selected" : "") + ">41.7 kHz</option>"
-            "<option value=\"62500\"" + String(loraBandwidth == 62500 ? " selected" : "") + ">62.5 kHz</option>"
-            "<option value=\"125000\"" + String(loraBandwidth == 125000 ? " selected" : "") + ">125 kHz (Balanced)</option>"
-            "<option value=\"250000\"" + String(loraBandwidth == 250000 ? " selected" : "") + ">250 kHz</option>"
-            "<option value=\"500000\"" + String(loraBandwidth == 500000 ? " selected" : "") + ">500 kHz (Max Speed)</option>"
-            "</select>"
+                               "<label for=\"lora_bw\">Signal Bandwidth (Hz):</label>"
+                               "<select id=\"lora_bw\" name=\"lora_bw\">"
+                               "<option value=\"7800\"" +
+            String(loraBandwidth == 7800 ? " selected" : "") + ">7.8 kHz (Max Range)</option>"
+                                                               "<option value=\"10400\"" +
+            String(loraBandwidth == 10400 ? " selected" : "") + ">10.4 kHz</option>"
+                                                                "<option value=\"15600\"" +
+            String(loraBandwidth == 15600 ? " selected" : "") + ">15.6 kHz</option>"
+                                                                "<option value=\"20800\"" +
+            String(loraBandwidth == 20800 ? " selected" : "") + ">20.8 kHz</option>"
+                                                                "<option value=\"31250\"" +
+            String(loraBandwidth == 31250 ? " selected" : "") + ">31.25 kHz</option>"
+                                                                "<option value=\"41700\"" +
+            String(loraBandwidth == 41700 ? " selected" : "") + ">41.7 kHz</option>"
+                                                                "<option value=\"62500\"" +
+            String(loraBandwidth == 62500 ? " selected" : "") + ">62.5 kHz</option>"
+                                                                "<option value=\"125000\"" +
+            String(loraBandwidth == 125000 ? " selected" : "") + ">125 kHz (Balanced)</option>"
+                                                                 "<option value=\"250000\"" +
+            String(loraBandwidth == 250000 ? " selected" : "") + ">250 kHz</option>"
+                                                                 "<option value=\"500000\"" +
+            String(loraBandwidth == 500000 ? " selected" : "") + ">500 kHz (Max Speed)</option>"
+                                                                 "</select>"
 
-            "<label for=\"lora_cr\">Coding Rate (4/x):</label>"
-            "<select id=\"lora_cr\" name=\"lora_cr\">"
-            "<option value=\"5\"" + String(loraCodingRate == 5 ? " selected" : "") + ">4/5 (Fast)</option>"
-            "<option value=\"6\"" + String(loraCodingRate == 6 ? " selected" : "") + ">4/6</option>"
-            "<option value=\"7\"" + String(loraCodingRate == 7 ? " selected" : "") + ">4/7</option>"
-            "<option value=\"8\"" + String(loraCodingRate == 8 ? " selected" : "") + ">4/8 (Robust)</option>"
-            "</select>"
+                                                                 "<label for=\"lora_cr\">Coding Rate (4/x):</label>"
+                                                                 "<select id=\"lora_cr\" name=\"lora_cr\">"
+                                                                 "<option value=\"5\"" +
+            String(loraCodingRate == 5 ? " selected" : "") + ">4/5 (Fast)</option>"
+                                                             "<option value=\"6\"" +
+            String(loraCodingRate == 6 ? " selected" : "") + ">4/6</option>"
+                                                             "<option value=\"7\"" +
+            String(loraCodingRate == 7 ? " selected" : "") + ">4/7</option>"
+                                                             "<option value=\"8\"" +
+            String(loraCodingRate == 8 ? " selected" : "") + ">4/8 (Robust)</option>"
+                                                             "</select>"
 
-            "<label for=\"lora_sf\">Spreading Factor:</label>"
-            "<select id=\"lora_sf\" name=\"lora_sf\">"
-            "<option value=\"6\"" + String(loraSpreadingFactor == 6 ? " selected" : "") + ">SF6 (Max Speed)</option>"
-            "<option value=\"7\"" + String(loraSpreadingFactor == 7 ? " selected" : "") + ">SF7 (Fast)</option>"
-            "<option value=\"8\"" + String(loraSpreadingFactor == 8 ? " selected" : "") + ">SF8</option>"
-            "<option value=\"9\"" + String(loraSpreadingFactor == 9 ? " selected" : "") + ">SF9 (Balanced)</option>"
-            "<option value=\"10\"" + String(loraSpreadingFactor == 10 ? " selected" : "") + ">SF10</option>"
-            "<option value=\"11\"" + String(loraSpreadingFactor == 11 ? " selected" : "") + ">SF11</option>"
-            "<option value=\"12\"" + String(loraSpreadingFactor == 12 ? " selected" : "") + ">SF12 (Max Range)</option>"
-            "</select>"
-            "</div>";
+                                                             "<label for=\"lora_sf\">Spreading Factor:</label>"
+                                                             "<select id=\"lora_sf\" name=\"lora_sf\">"
+                                                             "<option value=\"6\"" +
+            String(loraSpreadingFactor == 6 ? " selected" : "") + ">SF6 (Max Speed)</option>"
+                                                                  "<option value=\"7\"" +
+            String(loraSpreadingFactor == 7 ? " selected" : "") + ">SF7 (Fast)</option>"
+                                                                  "<option value=\"8\"" +
+            String(loraSpreadingFactor == 8 ? " selected" : "") + ">SF8</option>"
+                                                                  "<option value=\"9\"" +
+            String(loraSpreadingFactor == 9 ? " selected" : "") + ">SF9 (Balanced)</option>"
+                                                                  "<option value=\"10\"" +
+            String(loraSpreadingFactor == 10 ? " selected" : "") + ">SF10</option>"
+                                                                   "<option value=\"11\"" +
+            String(loraSpreadingFactor == 11 ? " selected" : "") + ">SF11</option>"
+                                                                   "<option value=\"12\"" +
+            String(loraSpreadingFactor == 12 ? " selected" : "") + ">SF12 (Max Range)</option>"
+                                                                   "</select>"
+                                                                   "</div>";
 
     html += "<input type=\"submit\" value=\"Save Configuration\">";
     html += "</form>";
@@ -432,8 +457,8 @@ void setup()
     valve1.begin();
     valve2.begin();
 
-    Wire.setClock(100000); // 100kHz instead of default 400kHz
     Wire.begin();
+    Wire.setClock(400000); // 100kHz instead of default 400kHz
 
     // Create ValveI2CTask
     xTaskCreate(
@@ -757,7 +782,7 @@ void ValveI2CTask(void *pvParameters)
 
         // --- I2C Data Packet ---
         uint16_t freqInt = static_cast<uint16_t>(loraFreq * 10); // Convert to integer first
-        uint8_t dataPacket[15] = {// Increased size from 7 to 15
+        uint8_t dataPacket[15] = {                               // Increased size from 7 to 15
                                   static_cast<uint8_t>(valve1.isOpen()),
                                   static_cast<uint8_t>(valve2.isOpen()),
                                   static_cast<uint8_t>(outputState1),
@@ -766,12 +791,12 @@ void ValveI2CTask(void *pvParameters)
                                   static_cast<uint8_t>(TestMode),
                                   static_cast<uint8_t>(parsuitedeploy),
                                   // LoRa configuration (8 bytes)
-                                  static_cast<uint8_t>(freqInt & 0xFF),                    // Frequency low byte (x10 for precision)
-                                  static_cast<uint8_t>((freqInt >> 8) & 0xFF),             // Frequency high byte
-                                  static_cast<uint8_t>(loraBandwidth & 0xFF),              // Bandwidth byte 1
-                                  static_cast<uint8_t>((loraBandwidth >> 8) & 0xFF),       // Bandwidth byte 2
-                                  static_cast<uint8_t>((loraBandwidth >> 16) & 0xFF),      // Bandwidth byte 3
-                                  static_cast<uint8_t>((loraBandwidth >> 24) & 0xFF),      // Bandwidth byte 4
+                                  static_cast<uint8_t>(freqInt & 0xFF),               // Frequency low byte (x10 for precision)
+                                  static_cast<uint8_t>((freqInt >> 8) & 0xFF),        // Frequency high byte
+                                  static_cast<uint8_t>(loraBandwidth & 0xFF),         // Bandwidth byte 1
+                                  static_cast<uint8_t>((loraBandwidth >> 8) & 0xFF),  // Bandwidth byte 2
+                                  static_cast<uint8_t>((loraBandwidth >> 16) & 0xFF), // Bandwidth byte 3
+                                  static_cast<uint8_t>((loraBandwidth >> 24) & 0xFF), // Bandwidth byte 4
                                   loraCodingRate,
                                   loraSpreadingFactor};
 
@@ -785,14 +810,18 @@ void ValveI2CTask(void *pvParameters)
         Wire.beginTransmission(TEENSY_I2C_ADDRESS);
         Wire.write(dataPacket, 15);
         Wire.endTransmission();
-
-        // Add error checking
-        // if (result != 0) {
-        //   Serial.print("I2C transmission failed, error code: ");
-        //   Serial.println(result);
-        // } else if (bytesWritten != 7) {
-        //   Serial.print("Expected to write 7 bytes, actually wrote: ");
-        //   Serial.println(bytesWritten);
+        // size_t bytesWritten = Wire.write(dataPacket, 15); // Write the data packet
+        // int result = Wire.endTransmission();
+        // // Add error checking
+        // if (result != 0)
+        // {
+        //     Serial.print("I2C transmission failed, error code: ");
+        //     Serial.println(result);
+        // }
+        // else if (bytesWritten != 15)
+        // {
+        //     Serial.print("Expected to write 7 bytes, actually wrote: ");
+        //     Serial.println(bytesWritten);
         // }
 
         vTaskDelay(xDelay);

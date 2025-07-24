@@ -1,653 +1,901 @@
+#include <Arduino.h>
+#include <TeensyThreads.h>
+#include <TimeLib.h>
+#include "SdFat.h"
+#include <ADC.h>
+#include <AnalogBufferDMA.h>
 #include <SPI.h>
-#include <RH_RF95.h>
-#include <WiFi.h>
-#include <WebServer.h>
-#include <DNSServer.h>
-#include <Preferences.h>
-#include <HTTPClient.h>
+#include <InternalTemperature.h>
+
+// for HX711 load cell
+#include "HX711.h"
+
+// for bno055
 #include <Wire.h>
-// #include <ArduinoJson.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+// for bmp280
+#include <Adafruit_BMP280.h>
 
-// Pin definitions for ESP32 and LoRa
-#define LORA_CS 5   // NSS pin
-#define LORA_RST 14 // RESET pin
-#define LORA_INT 2  // DIO0 (interrupt) pin
+// gps
+#include <TinyGPS++.h>
 
-// RF frequency setting
-#define RF95_FREQ 500
+// xbee pin
+//  pin 2 with pin7 teensy
+//  pin 3 with pin8 teensy
 
-// WiFi configuration
-#define AP_SSID "GroundStation📥-Config"
-#define AP_PASSWORD "logger1234"
-#define WIFI_TIMEOUT 10000 // 10 seconds
-#define DNS_PORT 53
+// BMP280 barometric pressure/altitude sensors
+Adafruit_BMP280 bmp1(&Wire);  // First sensor on primary I2C bus
+Adafruit_BMP280 bmp2(&Wire1); // Second sensor on secondary I2C bus
+// float temperature1 = 0.0f, temperature2 = 0.0f;
+// float pressure1 = 0.0f, pressure2 = 0.0f;
+float altitude1 = 0.0f, altitude2 = 0.0f;
+float averageAltitude = 0.0f;
+float seaLevelPressure = 1011.3; // Sea level pressure in hPa (customize for your location for better accuracy)
+// BNO055 variables--------------------------
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28);
+// Position tracking variables
+double xPos = 0, yPos = 0;
+double xAdjust = 0;
+double yAdjust = 0;
+double totalAccel = 0.0f; // Total acceleration magnitude
 
-// Data packet expected size
-#define MIN_PACKET_SIZE 16
+// global variables for sensor data
+imu::Vector<3> euler(0, 0, 0);
+imu::Vector<3> linearAccel(0, 0, 0);
+sensors_event_t orientationData, linearAccelData;
 
-// Initialize components
-RH_RF95 rf95(LORA_CS, LORA_INT);
-WebServer server(80);
-DNSServer dnsServer;
-Preferences preferences;
+// Constants for position calculation
+double MAXMIN_THRESH = 0.01;
+double MINMIN_THRESH = -0.01;
+uint16_t BNO055_SAMPLERATE_DELAY_MS = 10;
+int ACCELERATION_SCALE_X = 500;
+int ACCELERATION_SCALE_Y = 500;
+// velocity = accel*dt (dt in seconds)
+// position = 0.5*accel*dt^2
+double ACCEL_VEL_TRANSITION;
+double ACCEL_POS_TRANSITION;
+double DEG_2_RAD = 0.01745329251; // trig functions require radians, BNO055 outputs degrees
+float worldAccelX = 0.0f;
+float worldAccelY = 0.0f;
+// for analog reading------------------------
+// for current and voltage reading
+const int P1 = A9;
+const int P2 = A8;
+// for pressure transducer reading
+const int P3 = A7;
+const int P4 = A6;
 
-// Signal quality metrics
-int rssi = 0;
-float snr = 0;
-bool wifiConnected = false;
+// Global variable to analog reading
+float analog1 = 0.0f;
+float analog2 = 0.0f;
+float psi1 = 0.0f; // Global variable to store pressure
+float psi2 = 0.0f;
 
-// Add these at the top with other variables
-unsigned long lastServerAttempt = 0;
-const unsigned long SERVER_RETRY_INTERVAL = 3000; // 3 seconds between server retries      // Use DynamicJsonDocument with capacity parameter
+// for SD card---------------------------
+#define SD_CONFIG SdioConfig(FIFO_SDIO)
+SdFat32 sd;
+File32 file;
+// bool fileexists = false;
 
-// --- Pin Definitions ---
-constexpr uint8_t NANO1_PIN = 25;
-constexpr uint8_t NANO2_PIN = 26;
-constexpr uint8_t NANO3_PIN = 27;
-constexpr uint8_t NANO4_PIN = 32;
-constexpr uint8_t REMOTE_PIN = 33;
-constexpr uint8_t VALVE_PIN = 13;
+// for valve control
+const int Valve_PIN = 28;
+const int Camera_PIN = 29;
+bool Valve_state = false;
+unsigned long valveActivationTime = 0; // Track when valve was activated
+bool valveTimerActive = false;         // Track if 3-second timer is running
+bool Camera_state = false;
+static unsigned long cameraActivatedAt = 0;
+// for time
+unsigned long recordSN = 1; // Serial number for data records
+String timeStr = " ";
+// String dateStr = " ";
+// teensy internal temp
+float InternalTemp = 0.0f;
+int St = 0;
 
-// --- Telemetry State Variables ---
-volatile uint32_t sn = 0;
-volatile float timeValue = 0.0;
-// volatile bool testmode = false;
-volatile bool remotestate = false;
-volatile bool nano1 = false;
-volatile bool nano2 = false;
-volatile bool nano3 = false;
-volatile bool nano4 = false;
-volatile bool valveState = false;
-volatile float analog1 = 0.0;
-volatile float analog2 = 0.0;
-volatile float xPos = 0.0;
-volatile float yPos = 0.0;
-volatile float altitude = 0.0;
-volatile float eulerX = 0.0;
-volatile float eulerY = 0.0;
-volatile float eulerZ = 0.0;
-volatile float totalAccel = 0.0;
-volatile float gpsLat = 0.0;
-volatile float gpsLng = 0.0;
-volatile float p1Value = 0.0;
-volatile float p2Value = 0.0;
-volatile float weight = 0.0;
-// received from nano i2c
-volatile bool ConfigMode = false;
-volatile bool TestMode = false;
-volatile bool connectionState = false;
-int servo1Angle = 0;
-int servo2Angle = 0;
+// for I2C with Arduino Nano pin 24(SCL) and 25(SDA)
+bool remotestate = false;
+bool nanoValue1 = false;
+bool nanoValue2 = false;
+bool nanoValue3 = false;
+bool nanoValue4 = false;
+unsigned long lastReceiveTime = 0;
+bool dataReceived = false;
+bool testmode = false;
+unsigned long para_height = 5;
 
-// --- Packet Processing Variables ---
-String timeStr = "";
-volatile unsigned long lastPacketTime = 0;
-volatile bool newDataAvailable = false;
+// RF frequency - set according to your region (915MHz for US, 868MHz for EU)
+// #define RF95_FREQ 500
 
-// Function declarations
-void setupLoRa();
-void setupOutputPins();
-void setupWiFi();
-void startConfigPortal();
-void startWebServer();
-void handleRoot();
-void handleConfigSubmit();
-void handleNotFound();
-void decodeReceivedData(uint8_t *buffer, uint8_t len);
+// float loraFreq = 500.0;          // Default frequency in MHz
+// long loraBandwidth = 125000;     // Default bandwidth in Hz
+// uint8_t loraCodingRate = 5;      // Default coding rate (4/5)
+// uint8_t loraSpreadingFactor = 9; // Default spreading factor
+// bool loraUpdatePending = false;
 
-String formatTime(float timeValue);
+// GPS variables
+TinyGPSPlus gps;
+float gpsLat = 27.656902f, gpsLng = 85.327446f;
+// int gpsSats = 0;
+// float gpsHdop = 0.0f;
+// bool gpsValid = false;
 
-void sendDataToServer()
+// for load cell
+#define LOADCELL_DOUT_PIN 2
+#define LOADCELL_SCK_PIN 3
+
+HX711 scale;
+float calibrationFactor = -8.85;
+float tare = 0.0;
+float weight = 0.0;
+
+// DMA and ADC
+ADC *adc = new ADC(); // adc object
+const uint32_t initial_average_value = 2048;
+const uint32_t buffer_size = 128;
+
+DMAMEM static volatile uint16_t __attribute__((aligned(32))) buffer1[buffer_size];
+DMAMEM static volatile uint16_t __attribute__((aligned(32))) buffer2[buffer_size];
+AnalogBufferDMA analogBufferDMA1(buffer1, buffer_size, buffer2, buffer_size);
+
+DMAMEM static volatile uint16_t __attribute__((aligned(32))) buffer3[buffer_size];
+DMAMEM static volatile uint16_t __attribute__((aligned(32))) buffer4[buffer_size];
+AnalogBufferDMA analogBufferDMA2(buffer3, buffer_size, buffer4, buffer_size);
+
+DMAMEM static volatile uint16_t __attribute__((aligned(32))) buffer5[buffer_size];
+DMAMEM static volatile uint16_t __attribute__((aligned(32))) buffer6[buffer_size];
+AnalogBufferDMA analogBufferDMA3(buffer5, buffer_size, buffer6, buffer_size);
+
+DMAMEM static volatile uint16_t __attribute__((aligned(32))) buffer7[buffer_size];
+DMAMEM static volatile uint16_t __attribute__((aligned(32))) buffer8[buffer_size];
+AnalogBufferDMA analogBufferDMA4(buffer7, buffer_size, buffer8, buffer_size);
+
+// for xbee communication
+#define XBEE_BAUD_RATE 115200
+#define SERIAL_TIMEOUT 1000
+
+time_t getTeensy3Time()
 {
-    String serverURL = preferences.getString("serverurl", "192.168.1.12:5000");
-    String fullURL = "http://" + serverURL + "/add_data";
+  return Teensy3Clock.get();
+}
 
-    HTTPClient http;
-    http.begin(fullURL);
-    http.addHeader("Content-Type", "application/json");
-    http.setTimeout(250);
-    http.setConnectTimeout(250);
+bool writeCSVFile()
+{
 
-    // Optimized JSON building using snprintf instead of String concatenation
-    char jsonBuffer[512]; // Pre-allocated buffer
-    snprintf(jsonBuffer, sizeof(jsonBuffer),
-             "{\"record_sn\":\"%u\",\"remote_st\":%d,\"valve_1\":%d,\"valve_2\":%d,"
-             "\"activ_st\":%d,\"igni_st\":%d,\"para_st\":%d,\"voltage\":%.2f,"
-             "\"current\":%.2f,\"x_pos\":%.2f,\"y_pos\":%.2f,\"alt\":%.2f,"
-             "\"eu_x\":%.4f,\"eu_y\":%.4f,\"eu_z\":%.4f,\"acc_x\":%.4f,"
-             "\"lat\":%.6f,\"lon\":%.6f,\"rssi\":%d,\"snr\":%.1f}",
-             sn, remotestate ? 1 : 0, nano1 ? 1 : 0, nano2 ? 1 : 0,
-             nano3 ? 1 : 0, nano4 ? 1 : 0, valveState ? 1 : 0,
-             analog1, analog2, xPos, yPos, altitude,
-             eulerX, eulerY, eulerZ, totalAccel,
-             gpsLat, gpsLng, rssi, snr);
+  // Open file for writing (create if doesn't exist)
+  if (!file.open("data.csv", O_RDWR | O_CREAT | O_AT_END))
+  {
+    return false;
+  }
+  // Check if file is empty (new file)
+  if (file.size() == 0)
+  {
+    // Replace the existing header line in the writeCSVFile() function
+    file.println("SN,Time,remote,valv1,valv2,reast,ignst,parast,Current,Pressure,XPosition,YPosition,Altitude,EulerX,EulerY,EulerZ,AccelX,AccelY,AccelZ,GPSLat,GPSLng,TeensyTemp,p1,p2,weight,totalaccel");
+  }
+  // Write header and data rows
+  String data = String(recordSN++) + "," +
+                timeStr + "," +
+                String(remotestate ? 1 : 0) + "," +
+                String(nanoValue1 ? 1 : 0) + "," +
+                String(nanoValue2 ? 1 : 0) + "," +
+                String(nanoValue3 ? 1 : 0) + "," +
+                String(nanoValue4 ? 1 : 0) + "," +
+                Valve_state + "," +
+                analog1 + "," +
+                analog2 + "," +
+                xPos + "," +
+                yPos + "," +
+                averageAltitude + "," +
+                euler.x() + "," +
+                euler.y() + "," +
+                euler.z() + "," +
+                linearAccel.x() + "," +
+                linearAccel.y() + "," +
+                linearAccel.z() + "," +
+                String(gpsLat, 6) + "," +
+                String(gpsLng, 6) + "," +
+                InternalTemp + "," +
+                String(P1) + "," +  
+                String(P2) + "," +
+                weight + "," +
+                totalAccel;
+  file.println(data);
+  delayMicroseconds(150);
+  file.flush();
+  file.close();
 
-    // Send the JSON data
-    int httpResponseCode = http.POST(jsonBuffer);
-
-    // Optional: Handle response
-    // if (httpResponseCode > 0) {
-    //     String response = http.getString();
-    //     Serial.printf("HTTP Response: %d\n", httpResponseCode);
-    // } else {
-    //     Serial.printf("HTTP Error: %d\n", httpResponseCode);
-    // }
-
-    http.end();
+  return true;
 }
 
 // Function to handle I2C receive events
 void receiveEvent(int numBytes)
 {
-    if (numBytes != 5)
-        return; // Early exit
-
-    byte dataPacket[5];
-    int i = 0;
+  if (numBytes == 7) // Updated from 7 to 15 bytes
+  {
+    byte dataPacket[7];
     unsigned long startTime = millis();
+    int bytesRead = 0;
 
-    while (i < 5 && (millis() - startTime < 5))
-    { // Reduce timeout to 5ms
-        if (Wire.available())
-        {
-            dataPacket[i++] = Wire.read();
-        }
+    // Increase timeout to 50ms and add retry logic
+    while (bytesRead < 7 && (millis() - startTime < 60))
+    {
+      if (Wire2.available())
+      {
+        dataPacket[bytesRead] = Wire2.read();
+        bytesRead++;
+        startTime = millis(); // Reset timeout after each successful byte
+      }
     }
 
-    if (i == 5)
-    { // Only process if all data received
-        servo1Angle = dataPacket[0];
-        servo2Angle = dataPacket[1];
-        ConfigMode = dataPacket[2] > 0;
-        TestMode = dataPacket[3] > 0;
-        connectionState = dataPacket[4] > 0;
+    if (bytesRead < 7)
+    {
+      Serial.print("I2C timeout - only received ");
+      Serial.print(bytesRead);
+      Serial.println(" bytes");
+      return;
     }
+
+    // Convert to boolean values (first 7 bytes)
+    nanoValue1 = (dataPacket[0] > 0);  // valve1.isOpen()
+    nanoValue2 = (dataPacket[1] > 0);  // valve2.isOpen()
+    nanoValue3 = (dataPacket[2] > 0);  // outputState1
+    nanoValue4 = (dataPacket[3] > 0);  // outputState2
+    remotestate = (dataPacket[4] > 0); // masterStateHigh
+    testmode = (dataPacket[5] > 0);    // TestMode
+    para_height = dataPacket[6];       // parsuitedeploy
+
+    dataReceived = true;
+    lastReceiveTime = millis();
+  }
+  else
+  {
+    // Clear buffer if wrong packet size
+    while (Wire2.available())
+    {
+      Wire2.read();
+    }
+    Serial.print("Invalid packet size: ");
+    Serial.println(numBytes);
+  }
+}
+
+// Function to transmit all data in binary format
+
+void transmitBinaryData()
+{
+  uint8_t buffer[72];
+  int index = 0;
+
+  // Add start byte
+  buffer[index++] = 0xAA;
+
+  // Pack record serial number (4 bytes)
+  uint32_t sn = recordSN;
+  memcpy(&buffer[index], &sn, 4);
+  index += 4;
+
+  // Pack time as a float to preserve decimal portion (4 bytes)
+  float timeValue = minute(now()) + (second(now()) / 100.0f); // Convert to MM.SS format
+  memcpy(&buffer[index], &timeValue, 4);
+  index += 4;
+
+  // Pack remotestate (1 byte)
+  buffer[index++] = remotestate ? 1 : 0;
+
+  // Pack nano values (4 bytes)
+  buffer[index++] = nanoValue1 ? 1 : 0;
+  buffer[index++] = nanoValue2 ? 1 : 0;
+  buffer[index++] = nanoValue3 ? 1 : 0;
+  buffer[index++] = nanoValue4 ? 1 : 0;
+
+  // Pack analog values (8 bytes)
+  float a1 = analog1;
+  float a2 = analog2;
+  memcpy(&buffer[index], &a1, 4);
+  index += 4;
+  memcpy(&buffer[index], &a2, 4);
+  index += 4;
+
+  // Pack P1, P2, weight (12 bytes)
+  float p1Value = (float)P1;
+  memcpy(&buffer[index], &p1Value, 4);
+  index += 4;
+  float p2Value = (float)P2;
+  memcpy(&buffer[index], &p2Value, 4);
+  index += 4;
+  float weightValue = weight;
+  memcpy(&buffer[index], &weightValue, 4);
+  index += 4;
+
+  // Pack valve state (1 byte)
+  buffer[index++] = Valve_state ? 1 : 0;
+
+  // Pack position values (8 bytes)
+  float xp = xPos;
+  float yp = yPos;
+  memcpy(&buffer[index], &xp, 4);
+  index += 4;
+  memcpy(&buffer[index], &yp, 4);
+  index += 4;
+
+  // Pack altitude (4 bytes)
+  float alt = averageAltitude;
+  memcpy(&buffer[index], &alt, 4);
+  index += 4;
+
+  // Pack euler angles (12 bytes)
+  float ex = euler.x(), ey = euler.y(), ez = euler.z();
+  memcpy(&buffer[index], &ex, 4);
+  index += 4;
+  memcpy(&buffer[index], &ey, 4);
+  index += 4;
+  memcpy(&buffer[index], &ez, 4);
+  index += 4;
+
+  // Pack total acceleration (4 bytes)
+  float totalAccelValue = totalAccel;
+  memcpy(&buffer[index], &totalAccelValue, 4);
+  index += 4;
+
+  // Pack GPS coordinates (8 bytes)
+  float lat = gpsLat;
+  float lng = gpsLng;
+  memcpy(&buffer[index], &lat, 4);
+  index += 4;
+  memcpy(&buffer[index], &lng, 4);
+  index += 4;
+
+  // Add end byte
+  buffer[index++] = 0x55;
+
+  // Transmit the binary packet through XBee (Serial2)
+  Serial2.write(buffer, index);
+  Serial2.flush(); // Ensure all data is sent
+  Serial.print("Binary data sent: ");
+  Serial.print(index);
+  Serial.println(" bytes");
+}
+
+void task1()
+{
+  while (true)
+  {
+    // Serial.println("Task 1 running");
+    timeStr = String(minute(now())) + "." + String(second(now()));
+
+    // teensy cpu temperature
+    InternalTemp = InternalTemperature.readTemperatureC();
+
+    // loadcell
+    if (scale.is_ready())
+    {
+      weight = (scale.get_units() - tare) / (calibrationFactor * 1000.0);
+    }
+
+    // bmp280
+    //  Read data from first sensor
+    //  temperature1 = bmp1.readTemperature();
+    //  pressure1 = bmp1.readPressure() / 100.0; // Convert to hPa
+    altitude1 = bmp1.readAltitude(seaLevelPressure);
+
+    // Read data from second sensor
+    // temperature2 = bmp2.readTemperature();
+    // pressure2 = bmp2.readPressure() / 100.0; // Convert to hPa
+    altitude2 = bmp2.readAltitude(seaLevelPressure);
+
+    // Calculate average altitude (redundant measurement for accuracy)
+    averageAltitude = (altitude1 + altitude2) / 2.0;
+    // Create and write CSV file
+    if (nanoValue4)
+    {
+      writeCSVFile();
+    }
+    delay(70); // Run every 100 mili second
+  }
+}
+
+void task2()
+{
+  bool monitoringAltitude = false;
+  float initialAltitude = 0.0f;
+  bool valveHasBeenActivated = false;
+
+  while (true)
+  {
+    // Start monitoring when nanoValue4 becomes 1
+    if (nanoValue4 && !monitoringAltitude)
+    {
+      monitoringAltitude = true;
+      initialAltitude = averageAltitude;
+      valveHasBeenActivated = false;
+      Serial.print("Started monitoring altitude. Initial altitude: ");
+      Serial.print(initialAltitude);
+      Serial.println(" meters");
+    }
+
+    // If monitoring is active and altitude has decreased by 0.2 meters or more, deploy valve
+    // BUT only if valve hasn't been activated yet in this monitoring session
+    if (monitoringAltitude && !valveHasBeenActivated && (initialAltitude - averageAltitude >= para_height))
+    {
+      Valve_state = 1;
+      valveActivationTime = millis(); // Record activation time
+      valveTimerActive = true;        // Start the 2.5-second timer
+      valveHasBeenActivated = true;   // Mark that valve has been activated
+    }
+
+    // Check if 3 seconds have passed since valve activation
+    if (valveTimerActive && Valve_state && (millis() - valveActivationTime >= 5000))
+    {
+      Valve_state = 0;          // Turn off valve after 5 seconds
+      valveTimerActive = false; // Stop the timer
+    }
+
+    if (Valve_state)
+    {
+      analogWriteFrequency(Valve_PIN, 1000); // Set PWM frequency to 1kHz
+      analogWrite(Valve_PIN, 192); // Activate valve with full PWM
+    }
+    else
+    {
+      analogWrite(Valve_PIN, LOW);
+    }
+
+    if (nanoValue3 && !Camera_state)
+    {
+      Camera_state = 1;
+      cameraActivatedAt = millis();
+    }
+
+    if (Camera_state && (millis() - cameraActivatedAt >= 600000UL))
+    { // 10 minutes = 600,000 ms
+      Camera_state = 0;
+    }
+    digitalWrite(Camera_PIN, Camera_state ? HIGH : LOW);
+    // Reset monitoring if nanoValue4 becomes 0
+    if (!nanoValue4 && monitoringAltitude)
+    {
+      monitoringAltitude = false;
+      valveHasBeenActivated = false; // Reset for next monitoring session
+    }
+    delay(100);
+  }
+}
+
+void task3()
+{
+  while (true)
+  {
+    // Check for pending LoRa updates at the beginning
+
+    unsigned long startTime = millis();
+    boolean newData = false;
+
+    // Attempt to get new data for ~1 second
+    while (millis() - startTime < 100)
+    {
+      if (Serial1.available() > 0)
+      {
+        char c = Serial1.read();
+        // Uncomment to see raw NMEA data
+        // Serial.print(c);
+        if (gps.encode(c))
+          newData = true;
+      }
+    }
+    if (newData && gps.location.isValid())
+    {
+      gpsLat = gps.location.lat();
+      gpsLng = gps.location.lng();
+    }
+
+    // Write header and data rows with BMP280 values
+    String data = String(recordSN++) + "," +
+                  timeStr + "," +
+                  testmode + "," +
+                  String(remotestate ? 1 : 0) + "," +
+                  String(nanoValue1 ? 1 : 0) + "," +
+                  String(nanoValue2 ? 1 : 0) + "," +
+                  String(nanoValue3 ? 1 : 0) + "," +
+                  String(nanoValue4 ? 1 : 0) + "," +
+                  Valve_state + "," +
+                  analog1 + "," +
+                  analog2 + "," +
+                  xPos + "," +
+                  yPos + "," +
+                  averageAltitude + "," +
+                  euler.x() + "," +
+                  euler.y() + "," +
+                  euler.z() + "," +
+                  totalAccel + "," +
+                  String(gpsLat, 6) + "," +
+                  String(gpsLng, 6) + "," +
+                  P1 + "," +
+                  P2 + "," +
+                  weight;
+
+    Serial.println(data);
+
+    // need to do binary encoding to transmit it
+    transmitBinaryData();
+
+    delay(100);
+  }
+}
+
+void task4_bno055()
+{
+  while (true)
+  {
+
+    // Get events from sensor
+    bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
+    bno.getEvent(&linearAccelData, Adafruit_BNO055::VECTOR_LINEARACCEL);
+
+    // Update global vectors with the data
+    euler = imu::Vector<3>(orientationData.orientation.x,
+                           orientationData.orientation.y,
+                           orientationData.orientation.z);
+
+    linearAccel = imu::Vector<3>(linearAccelData.acceleration.x,
+                                 linearAccelData.acceleration.y,
+                                 linearAccelData.acceleration.z);
+
+    // Convert to radians and apply your orientation convention
+    float heading = orientationData.orientation.x * DEG_2_RAD;
+    float pitch = orientationData.orientation.y * DEG_2_RAD;
+    float roll = (360.0 - orientationData.orientation.z) * DEG_2_RAD; // Convert from your 360-roll format
+
+    // Create rotation matrix components
+    float ch = cos(heading);
+    float sh = sin(heading);
+    float cp = cos(pitch);
+    float sp = sin(pitch);
+    float cr = cos(roll);
+    float sr = sin(roll);
+
+    // Only calculate the rotation matrix elements we actually use (for X and Y)
+    float r00 = ch * cp;
+    float r01 = sh * sr - ch * sp * cr;
+    float r02 = ch * sp * sr + sh * cr;
+    float r10 = sp;
+    float r11 = cp * cr;
+    float r12 = -cp * sr;
+
+    // Apply rotation to raw accelerometer data
+    worldAccelX = r00 * linearAccel.x() + r01 * linearAccel.y() + r02 * linearAccel.z();
+    worldAccelY = r10 * linearAccel.x() + r11 * linearAccel.y() + r12 * linearAccel.z();
+
+    // Calculate position adjustments
+    xAdjust = ACCEL_POS_TRANSITION * (worldAccelX * ACCELERATION_SCALE_X);
+    yAdjust = ACCEL_POS_TRANSITION * (worldAccelY * ACCELERATION_SCALE_Y);
+    // Serial.println(yAdjust);
+    // float yDeadBand = 0.02; // Adjust based on testing
+    // if (abs(yAdjust) < yDeadBand)
+    // {
+    //   yAdjust = 0;
+    // }
+    // float xDeadBand = 0.01;
+    // if (abs(xAdjust) < xDeadBand)
+    // {
+    //   xAdjust = 0;
+    // }
+
+    // Proper magnitude threshold check (using squared values to avoid sqrt)
+    float adjustSquared = xAdjust * xAdjust + yAdjust * yAdjust;
+    float threshSquared = MAXMIN_THRESH * MAXMIN_THRESH;
+
+    // Only update position if adjustment magnitude is significant
+    if (adjustSquared > threshSquared)
+    {
+      xPos -= xAdjust;
+      yPos -= yAdjust;
+    }
+
+    // Calculate heading velocity
+    // double Vel = ACCEL_VEL_TRANSITION * linearAccelData.acceleration.x /
+    //             cos(DEG_2_RAD * orientationData.orientation.x);
+
+    // Calculate total acceleration
+    totalAccel = sqrt(pow(linearAccel.x(), 2) +
+                      pow(linearAccel.y(), 2) +
+                      pow(linearAccel.z(), 2));
+
+    // // Apply threshold
+    if (totalAccel < 0.4)
+    {
+      totalAccel = 0;
+    }
+    delay(BNO055_SAMPLERATE_DELAY_MS);
+  }
+}
+
+float analogToCurrent(int analogValue)
+{
+  // For 3.3V reference voltage on Teensy
+  float voltage = (analogValue * 3.3) / 4095.0;
+
+  // Convert to current based on ACS712 sensitivity
+  // For ACS712-20A: 100mV/A, zero current at VCC/2 (1.65V for 3.3V system)
+  float currentAmps = (voltage - 1.65) / 0.075; // 0.075V/A sensitivity for ACS712-20A
+
+  return currentAmps;
+}
+
+float analogToVoltage(int analogValue)
+{
+  // For 3.3V reference voltage on Teensy
+  float measuredVoltage = (analogValue * 3.3) / 4095.0;
+
+  // Voltage divider scaling factor
+  // If 12V input becomes 3.38V output, the scaling factor is 12/3.38 = 3.55
+  float scalingFactor = 12.0 / 3.38;
+
+  // Convert back to actual input voltage
+  float actualVoltage = measuredVoltage * scalingFactor;
+
+  return actualVoltage;
+}
+
+float analogToPsi(int analogValue)
+{
+  // Convert analog reading (0-4095) to voltage (0-10V)
+  // float voltage = (analogValue * 10.0f) / 4095.0f;
+  // Convert voltage (0-10V) to pressure in bar (0-100 bar)
+  // float pressureBar = (voltage / 10.0f) * 100.0f;
+  // Convert bar to PSI (1 bar = 14.5038 PSI)
+  // float pressurePsi = pressureBar * 14.5038f;
+  float pressureBar = (analogValue * 100.0f) / 4095.0f;
+  // delay(50);
+  return pressureBar;
+}
+
+void adc0_isr()
+{
+  static int currentPin = P1;
+  uint16_t value = adc->adc0->analogReadContinuous();
+
+  switch (currentPin)
+  {
+  case P1:
+    analog1 = analogToCurrent(value);
+    currentPin = P2;
+    adc->adc0->startContinuous(P2);
+    break;
+  case P2:
+    analog2 = analogToVoltage(value);
+    currentPin = P3;
+    adc->adc0->startContinuous(P3);
+    break;
+  case P3:
+    psi1 = analogToPsi(value);
+    currentPin = P4;
+    adc->adc0->startContinuous(P4);
+    break;
+  case P4:
+    psi2 = analogToPsi(value);
+    currentPin = P1;
+    adc->adc0->startContinuous(P1);
+    break;
+  }
+}
+
+// --- XBee Command Helpers ---
+bool enterCommandMode()
+{
+  while (Serial2.available())
+    Serial2.read();
+  delay(1100);
+  Serial2.print("+++");
+  delay(1100);
+
+  unsigned long start = millis();
+  String resp = "";
+  while (millis() - start < SERIAL_TIMEOUT)
+  {
+    if (Serial2.available())
+      resp += (char)Serial2.read();
+    if (resp.indexOf("OK") != -1)
+      return true;
+  }
+  return false;
+}
+
+void sendAT(String cmd)
+{
+  Serial2.print(cmd + "\r");
+  delay(200);
+  while (Serial2.available())
+    Serial2.read(); // flush
+}
+
+void configureXBee()
+{
+  if (!enterCommandMode())
+  {
+    Serial.println("XBee: Command mode failed");
+    return;
+  }
+  // sendAT("ATHP 0");                // Disable hardware flow control
+  // sendAT("ATID 1011");             // Set PAN ID
+  // sendAT("ATCM FFFFFFFE00000000"); // Set coordinator address
+  // sendAT("ATBD 7");                // Set baud rate to 115200
+  // sendAT("ATAP 0");                // Set API mode to 0 (transparent mode)
+  // sendAT("ATNH 1");                // Set node identifier (optional)
+  // sendAT("ATMT 3");                // Set maximum transmission retries
+  // sendAT("ATRR 3");                // Set retry count for transmission
+  // sendAT("ATCE 0");                // message mode
+  // // sendAT("ATKY 3FA7C21898D24F619E4A7DB1ED8F102B");
+  // sendAT("ATWR");                  // Write settings to non-volatile memory
+  // sendAT("ATCN");                  // Exit command mode
+  sendAT("ATHP 1");                // Enable hardware flow control
+  sendAT("ATID 1011");             // PAN ID
+  sendAT("ATCM FFFFFFFE00000000"); // Coordinator address
+  sendAT("ATBD 7");                // 115200 baud
+  sendAT("ATAP 0");                // Transparent mode
+  sendAT("ATNH 1");                // Max hops
+  sendAT("ATMT 1");                // Transmission failure threshold
+  sendAT("ATRR 1");                // Retry count
+  sendAT("ATCE 0");                // Standard router
+  sendAT("ATRO 0");                // No delay in serial packetization
+  sendAT("ATWR");                  // Save
+  sendAT("ATCN");                  // Exit
+
+  Serial.println("XBee: Configured");
 }
 
 void setup()
 {
-    Serial.begin(115200);
-    Serial.println("ESP32 LoRa Receiver Starting");
+  Serial.begin(115200);
+  // Wait for USB Serial
+  // while (!Serial)
+  // {
+  //   yield();
+  // }
 
-    preferences.begin("wifi", false);
-    setupLoRa();
-    setupOutputPins();
-    setupWiFi();
+  // Debug prints
+  Serial.println("Starting...");
+  delay(100);
+  // Initialize GPS on Serial1 (pins 0/1)
+  Serial1.begin(9600);
 
-    // Wire.setClock(100000); // 100kHz instead of default 400kHz
-    Wire.begin(0x42); // Initialize as slave with address 0x42
-    Wire.onReceive(receiveEvent);
+  pinMode(P1, INPUT);
+  pinMode(P2, INPUT);
+  pinMode(P3, INPUT);
+  pinMode(P4, INPUT);
 
-    Serial.println("Receiver ready!");
-}
+  adc->adc0->setAveraging(32);
+  adc->adc0->setResolution(12);
+  adc->adc0->setConversionSpeed(ADC_CONVERSION_SPEED::VERY_LOW_SPEED);
+  adc->adc0->setSamplingSpeed(ADC_SAMPLING_SPEED::VERY_LOW_SPEED);
 
-void setupLoRa()
-{
-    // Configure reset pin
-    pinMode(LORA_RST, OUTPUT);
+  Serial.println("Initializing DMA buffers...");
+  analogBufferDMA1.init(adc, ADC_0);
+  analogBufferDMA1.userData(initial_average_value);
 
-    // Reset LoRa module
-    digitalWrite(LORA_RST, LOW);
-    delay(10);
-    digitalWrite(LORA_RST, HIGH);
-    delay(10);
+  analogBufferDMA2.init(adc, ADC_0);
+  analogBufferDMA2.userData(initial_average_value);
 
-    if (!rf95.init())
-    {
-        Serial.println("LoRa initialization failed!");
-        while (1)
-        {
-            delay(100);
-        }
-    }
+  analogBufferDMA3.init(adc, ADC_0);
+  analogBufferDMA3.userData(initial_average_value);
 
-    // Get LoRa settings from preferences
-    int frequency = preferences.getInt("lora_freq", RF95_FREQ);
-    int bandwidth = preferences.getInt("lora_bw", 125000);
-    int codingRate = preferences.getInt("lora_cr", 5);
-    int spreadingFactor = preferences.getInt("lora_sf", 9);
+  analogBufferDMA4.init(adc, ADC_0);
+  analogBufferDMA4.userData(initial_average_value);
 
-    if (!rf95.setFrequency(frequency))
-    {
-        Serial.println("Setting frequency failed!");
-        while (1)
-        {
-            delay(100);
-        }
-    }
+  // Enable interrupts for ADC0 and pass the ISR function
+  adc->adc0->enableInterrupts(adc0_isr);
+  adc->adc0->enableDMA();
 
-    // Configure LoRa parameters from saved settings
-    rf95.setSignalBandwidth(bandwidth);
-    rf95.setCodingRate4(codingRate);
-    rf95.setSpreadingFactor(spreadingFactor);
-    rf95.spiWrite(RH_RF95_REG_0C_LNA, 0x23);
-    rf95.setModeRx();
+  adc->adc0->startContinuous(P1);
+  // adc->adc0->startContinuous(P2);
+  // adc->adc0->startContinuous(P3);
 
-    Serial.printf("LoRa initialized: %d MHz, BW=%d Hz, CR=4/%d, SF=%d\n",
-                  frequency, bandwidth, codingRate, spreadingFactor);
-}
+  // Register the ISR
+  // attachInterruptVector(IRQ_ADC0, adc0_isr);
+  // NVIC_ENABLE_IRQ(IRQ_ADC0);
+  setSyncProvider(getTeensy3Time);
 
-void setupOutputPins()
-{
-    // Configure output pins
-    pinMode(NANO1_PIN, OUTPUT);
-    pinMode(NANO2_PIN, OUTPUT);
-    pinMode(NANO3_PIN, OUTPUT);
-    pinMode(NANO4_PIN, OUTPUT);
-    pinMode(REMOTE_PIN, OUTPUT);
-    pinMode(VALVE_PIN, OUTPUT);
+  // Initialize the SD.
+  if (!sd.begin(SD_CONFIG))
+  {
+    // sd.initErrorHalt(&Serial);
+    Serial.println("SD card initialization failed.");
+    // return;
+  }
+  else
+  {
+    Serial.println("SD card initialized successfully.");
+  }
+  // Initialize I2C buses for BMP280 sensors
+  Wire.begin();  // Primary I2C bus
+  Wire1.begin(); // Secondary I2C bus
 
-    // Initialize all outputs to LOW
-    digitalWrite(NANO1_PIN, LOW);
-    digitalWrite(NANO2_PIN, LOW);
-    digitalWrite(NANO3_PIN, LOW);
-    digitalWrite(NANO4_PIN, LOW);
-    digitalWrite(REMOTE_PIN, LOW);
-    digitalWrite(VALVE_PIN, LOW);
-}
+  if (!bmp1.begin(0x76))
+  {
+    Serial.println("Could not find BMP280 sensor #1, check wiring!");
+  }
+  else
+  {
+    // Configure settings for first sensor
+    bmp1.setSampling(Adafruit_BMP280::MODE_NORMAL,
+                     Adafruit_BMP280::SAMPLING_X2,
+                     Adafruit_BMP280::SAMPLING_X16,
+                     Adafruit_BMP280::FILTER_X16,
+                     Adafruit_BMP280::STANDBY_MS_1);
+    Serial.println("BMP280 sensor #1 initialized!");
+  }
 
-void setupWiFi()
-{
-    // Try to connect to saved WiFi credentials
-    String ssid = preferences.getString("ssid", "");
-    String password = preferences.getString("password", "");
+  if (!bmp2.begin(0x76))
+  {
+    Serial.println("Could not find BMP280 sensor #2, check wiring!");
+  }
+  else
+  {
+    // Configure settings for second sensor
+    bmp2.setSampling(Adafruit_BMP280::MODE_NORMAL,
+                     Adafruit_BMP280::SAMPLING_X2,
+                     Adafruit_BMP280::SAMPLING_X16,
+                     Adafruit_BMP280::FILTER_X16,
+                     Adafruit_BMP280::STANDBY_MS_1);
+    Serial.println("BMP280 sensor #2 initialized!");
+  }
 
-    if (ssid.length() > 0)
-    {
-        Serial.println("Connecting to saved WiFi: " + ssid);
-        WiFi.begin(ssid.c_str(), password.c_str());
+  // receive data from esp32 via I2C
+  Wire2.begin(0x42);      // Initialize as slave with address 0x42
+  Wire2.setClock(400000); // 100kHz instead of default 400kHz
+  Wire2.onReceive(receiveEvent);
+  Serial.println("Teensy I2C Slave initialized on Wire2");
+  // valve control
+  pinMode(Valve_PIN, OUTPUT);
+  analogWriteFrequency(Valve_PIN, 1000); // Set PWM frequency to 1kHz
+  pinMode(Camera_PIN, OUTPUT);
+  digitalWrite(Valve_PIN, LOW);
 
-        unsigned long startTime = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - startTime < WIFI_TIMEOUT)
-        {
-            delay(500);
-            Serial.print(".");
-        }
+  // load cell
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  // scale.set_scale();
+  scale.tare(); // Reset to 0
+  tare = scale.get_units(10);
 
-        if (WiFi.status() == WL_CONNECTED)
-        {
-            wifiConnected = true;
-            Serial.println("\nWiFi connected at " + WiFi.localIP().toString());
-            startWebServer();
-            return;
-        }
-        Serial.println("\nFailed to connect to saved WiFi");
-    }
+  // Initialize BNO055
+  if (!bno.begin())
+  {
+    Serial.println("No BNO055 detected. Check your wiring or I2C address!");
+  }
+  else
+  {
+    Serial.println("BNO055 initialized successfully!");
+    // Calculate constants based on sample rate
+    ACCEL_VEL_TRANSITION = (double)(BNO055_SAMPLERATE_DELAY_MS) / 1000.0;
+    ACCEL_POS_TRANSITION = 0.5 * ACCEL_VEL_TRANSITION * ACCEL_VEL_TRANSITION;
+  }
+  delay(1000);
+  // Configure XBee
+  Serial2.begin(XBEE_BAUD_RATE, SERIAL_8N1); // Initialize XBee serial port
+  delay(1000);
+  configureXBee();
+  Serial.println("Xbee configured successfully!");
 
-    // Start config portal if connection failed or no credentials
-    startConfigPortal();
-}
-
-void startWebServer()
-{
-    server.on("/", handleRoot);
-    server.on("/config", HTTP_POST, handleConfigSubmit);
-    server.onNotFound(handleNotFound);
-    server.begin();
-}
-
-void startConfigPortal()
-{
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(AP_SSID, AP_PASSWORD);
-
-    Serial.println("Access Point started: " + String(AP_SSID));
-    Serial.println("IP: " + WiFi.softAPIP().toString());
-
-    dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
-    startWebServer();
-}
-
-void handleRoot()
-{
-    String currentSSID = preferences.getString("ssid", "");
-    String currentServerURL = preferences.getString("serverurl", "192.168.1.12:5000");
-    String connectionStatus = wifiConnected ? "Connected" : "Not Connected";
-    String currentIP = wifiConnected ? WiFi.localIP().toString() : "N/A";
-
-    // Get current LoRa settings
-    int currentFreq = preferences.getInt("lora_freq", RF95_FREQ);
-    int currentBandwidth = preferences.getInt("lora_bw", 125000);
-    int currentCodingRate = preferences.getInt("lora_cr", 5);
-    int currentSpreadingFactor = preferences.getInt("lora_sf", 9);
-
-    String html = "<!DOCTYPE html>"
-                  "<html>"
-                  "<head>"
-                  "<title>Ground Station Config</title>"
-                  "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-                  "<style>"
-                  "body{font-family:Arial,sans-serif;margin:40px;background:#f0f0f0;}"
-                  ".container{max-width:500px;margin:0 auto;background:white;padding:30px;border-radius:10px;box-shadow:0 4px 6px rgba(0,0,0,0.1);}"
-                  "h1{color:#333;text-align:center;margin-bottom:30px;}"
-                  "h2{color:#555;border-bottom:2px solid #4CAF50;padding-bottom:10px;}"
-                  "input[type=\"text\"],input[type=\"password\"],select{width:100%;padding:12px;margin:8px 0;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;}"
-                  "input[type=\"submit\"]{width:100%;background-color:#4CAF50;color:white;padding:14px;margin:8px 0;border:none;border-radius:4px;cursor:pointer;font-size:16px;}"
-                  "input[type=\"submit\"]:hover{background-color:#45a049;}"
-                  ".info{background:#e7f3ff;padding:15px;border-radius:4px;margin-bottom:20px;border-left:4px solid #2196F3;}"
-                  ".status{background:#e8f5e8;padding:15px;border-radius:4px;margin-bottom:20px;border-left:4px solid #4CAF50;}"
-                  ".status.disconnected{background:#ffe8e8;border-left-color:#f44336;}"
-                  ".section{margin-bottom:30px;padding:20px;background:#f9f9f9;border-radius:8px;}"
-                  ".warning{background:#fff3cd;border:1px solid #ffeaa7;padding:10px;border-radius:4px;color:#856404;margin:10px 0;}"
-                  ".footer{text-align:center;margin-top:30px;padding:15px;color:#666;font-size:14px;border-top:1px solid #ddd;}"
-                  "</style>"
-                  "</head>"
-                  "<body>"
-                  "<div class=\"container\">"
-                  "<h1>Ground Station Config</h1>"
-                  "<div class=\"status" +
-                  String(!wifiConnected ? " disconnected" : "") + "\">"
-                                                                  "<strong>WiFi Status:</strong> " +
-                  connectionStatus + "<br>"
-                                     "<strong>Current Network:</strong> " +
-                  (currentSSID.length() > 0 ? currentSSID : "None") + "<br>"
-                                                                      "<strong>IP Address:</strong> " +
-                  currentIP + "<br>"
-                              "<strong>Server URL:</strong> " +
-                  currentServerURL +
-                  "</div>"
-
-                  "<form action=\"/config\" method=\"POST\">"
-
-                  "<div class=\"section\">"
-                  "<h2>WiFi Configuration</h2>"
-                  "<label for=\"ssid\">WiFi Network Name (SSID):</label>"
-                  "<input type=\"text\" id=\"ssid\" name=\"ssid\" placeholder=\"Enter WiFi network name\" value=\"" +
-                  currentSSID + "\">"
-                                "<label for=\"password\">WiFi Password:</label>"
-                                "<input type=\"password\" id=\"password\" name=\"password\" placeholder=\"Leave empty to keep current password\">"
-                                "<label for=\"serverurl\">Server URL (IP:Port):</label>"
-                                "<input type=\"text\" id=\"serverurl\" name=\"serverurl\" placeholder=\"e.g., 192.168.1.12:5000\" value=\"" +
-                  currentServerURL + "\">"
-                                     "</div>"
-
-                                     "<div class=\"section\">"
-                                     "<h2>LoRa Configuration</h2>"
-                                     "<div class=\"warning\">&#9888;&#65039; Changing LoRa settings requires restart. Ensure transmitter uses same settings!</div>"
-
-                                     "<label for=\"lora_freq\">Frequency (MHz):</label>"
-                                     "<input type=\"number\" id=\"lora_freq\" name=\"lora_freq\" min=\"410\" max=\"525\" step=\"0.1\" value=\"" +
-                  String(currentFreq) + "\" placeholder=\"Enter frequency (410-525 MHz)\">"
-                                        "<small style=\"color:#666;display:block;margin-top:5px;\">Valid range: 410-525 MHz</small>"
-
-                                        "<label for=\"lora_bw\">Signal Bandwidth (Hz):</label>"
-                                        "<select id=\"lora_bw\" name=\"lora_bw\">"
-                                        "<option value=\"7800\"" +
-                  String(currentBandwidth == 7800 ? " selected" : "") + ">7.8 kHz (Max Range)</option>"
-                                                                        "<option value=\"10400\"" +
-                  String(currentBandwidth == 10400 ? " selected" : "") + ">10.4 kHz</option>"
-                                                                         "<option value=\"15600\"" +
-                  String(currentBandwidth == 15600 ? " selected" : "") + ">15.6 kHz</option>"
-                                                                         "<option value=\"20800\"" +
-                  String(currentBandwidth == 20800 ? " selected" : "") + ">20.8 kHz</option>"
-                                                                         "<option value=\"31250\"" +
-                  String(currentBandwidth == 31250 ? " selected" : "") + ">31.25 kHz</option>"
-                                                                         "<option value=\"41700\"" +
-                  String(currentBandwidth == 41700 ? " selected" : "") + ">41.7 kHz</option>"
-                                                                         "<option value=\"62500\"" +
-                  String(currentBandwidth == 62500 ? " selected" : "") + ">62.5 kHz</option>"
-                                                                         "<option value=\"125000\"" +
-                  String(currentBandwidth == 125000 ? " selected" : "") + ">125 kHz (Balanced)</option>"
-                                                                          "<option value=\"250000\"" +
-                  String(currentBandwidth == 250000 ? " selected" : "") + ">250 kHz</option>"
-                                                                          "<option value=\"500000\"" +
-                  String(currentBandwidth == 500000 ? " selected" : "") + ">500 kHz (Max Speed)</option>"
-                                                                          "</select>"
-
-                                                                          "<label for=\"lora_cr\">Coding Rate (4/x):</label>"
-                                                                          "<select id=\"lora_cr\" name=\"lora_cr\">"
-                                                                          "<option value=\"5\"" +
-                  String(currentCodingRate == 5 ? " selected" : "") + ">4/5 (Fast)</option>"
-                                                                      "<option value=\"6\"" +
-                  String(currentCodingRate == 6 ? " selected" : "") + ">4/6</option>"
-                                                                      "<option value=\"7\"" +
-                  String(currentCodingRate == 7 ? " selected" : "") + ">4/7</option>"
-                                                                      "<option value=\"8\"" +
-                  String(currentCodingRate == 8 ? " selected" : "") + ">4/8 (Robust)</option>"
-                                                                      "</select>"
-
-                                                                      "<label for=\"lora_sf\">Spreading Factor:</label>"
-                                                                      "<select id=\"lora_sf\" name=\"lora_sf\">"
-                                                                      "<option value=\"6\"" +
-                  String(currentSpreadingFactor == 6 ? " selected" : "") + ">SF6 (Max Speed)</option>"
-                                                                           "<option value=\"7\"" +
-                  String(currentSpreadingFactor == 7 ? " selected" : "") + ">SF7 (Fast)</option>"
-                                                                           "<option value=\"8\"" +
-                  String(currentSpreadingFactor == 8 ? " selected" : "") + ">SF8</option>"
-                                                                           "<option value=\"9\"" +
-                  String(currentSpreadingFactor == 9 ? " selected" : "") + ">SF9 (Balanced)</option>"
-                                                                           "<option value=\"10\"" +
-                  String(currentSpreadingFactor == 10 ? " selected" : "") + ">SF10</option>"
-                                                                            "<option value=\"11\"" +
-                  String(currentSpreadingFactor == 11 ? " selected" : "") + ">SF11</option>"
-                                                                            "<option value=\"12\"" +
-                  String(currentSpreadingFactor == 12 ? " selected" : "") + ">SF12 (Max Range)</option>"
-                                                                            "</select>"
-                                                                            "</div>"
-
-                                                                            "<input type=\"submit\" value=\"Save Configuration & Restart\">"
-                                                                            "</form>"
-
-                                                                            "<div class=\"footer\">"
-                                                                            "Developed by <strong>Srijan Koju</strong>"
-                                                                            "</div>"
-
-                                                                            "</div>"
-                                                                            "</body>"
-                                                                            "</html>";
-
-    server.send(200, "text/html", html);
-}
-
-void handleConfigSubmit()
-{
-    String ssid = server.arg("ssid");
-    String password = server.arg("password");
-    String serverurl = server.arg("serverurl");
-    String loraFreq = server.arg("lora_freq");
-    String loraBw = server.arg("lora_bw");
-    String loraCr = server.arg("lora_cr");
-    String loraSf = server.arg("lora_sf");
-
-    // Get current saved SSID
-    String currentSSID = preferences.getString("ssid", "");
-
-    // Check if this is a new network or just updating settings
-    bool isNewNetwork = (ssid != currentSSID);
-
-        // Validate frequency range
-    if (loraFreq.length() > 0) {
-        float freq = loraFreq.toFloat();
-        if (freq < 410.0 || freq > 525.0) {
-            server.send(400, "text/plain", "Frequency must be between 410-525 MHz");
-            return;
-        }
-    }
-
-    if (ssid.length() > 0 && serverurl.length() > 0)
-    {
-        // For new networks, require password
-        if (isNewNetwork && password.length() == 0)
-        {
-            server.send(400, "text/plain", "Password required for new WiFi network");
-            return;
-        }
-
-        // Save WiFi credentials and server URL
-        preferences.putString("ssid", ssid);
-
-        // Update password only if provided or if it's a new network
-        if (password.length() > 0)
-        {
-            preferences.putString("password", password);
-        }
-
-        preferences.putString("serverurl", serverurl);
-
-        // Save LoRa settings
-        if (loraFreq.length() > 0)
-            preferences.putInt("lora_freq", loraFreq.toInt());
-        if (loraBw.length() > 0)
-            preferences.putInt("lora_bw", loraBw.toInt());
-        if (loraCr.length() > 0)
-            preferences.putInt("lora_cr", loraCr.toInt());
-        if (loraSf.length() > 0)
-            preferences.putInt("lora_sf", loraSf.toInt());
-
-        // ... rest of success response
-        String html = "<!DOCTYPE html>"
-                      "<html>"
-                      "<body style=\"font-family:Arial,sans-serif;text-align:center;margin:50px;\">"
-                      "<div style=\"max-width:400px;margin:0 auto;padding:30px;background:white;border-radius:10px;box-shadow:0 4px 6px rgba(0,0,0,0.1);\">"
-                      "<h2>Configuration Saved</h2>"
-                      "<p>WiFi and LoRa settings have been saved.</p>"
-                      "<p>Device will restart in <span id=\"countdown\">5</span> seconds...</p>"
-                      "<script>"
-                      "var count = 5;"
-                      "setInterval(function(){"
-                      "count--;"
-                      "document.getElementById('countdown').innerHTML = count;"
-                      "if(count <= 0) location.reload();"
-                      "}, 1000);"
-                      "</script>"
-                      "</div>"
-                      "</body>"
-                      "</html>";
-
-        server.send(200, "text/html", html);
-        delay(5000);
-        ESP.restart();
-    }
-    else
-    {
-        server.send(400, "text/plain", "Invalid SSID or Server URL");
-    }
-}
-
-void handleNotFound()
-{
-    // Redirect all unknown requests to root (captive portal behavior)
-    server.sendHeader("Location", "/", true);
-    server.send(302, "text/plain", "");
+  // Start each task with error checking
+  if (threads.addThread(task1) == -1)
+  {
+    Serial.println("Failed to create task 1");
+  }
+  if (threads.addThread(task2) == -1)
+  {
+    Serial.println("Failed to create task 2");
+  }
+  if (threads.addThread(task3) == -1)
+  {
+    Serial.println("Failed to create task 3");
+  }
+  if (threads.addThread(task4_bno055) == -1)
+  {
+    Serial.println("Failed to create BNO055 task");
+  }
 }
 
 void loop()
 {
-    // Handle DNS and web server
-    if (!wifiConnected)
-    {
-        dnsServer.processNextRequest();
-    }
-    server.handleClient();
-
-    // Check for LoRa messages
-    if (rf95.available())
-    {
-        uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
-        uint8_t len = sizeof(buf);
-
-        if (rf95.recv(buf, &len))
-        {
-            rssi = rf95.lastRssi();
-            snr = rf95.lastSNR();
-            decodeReceivedData(buf, len);
-        }
-    }
-    // else
-    // {
-    //     Serial.printf("%d,%d,%d,%d,%d\n",
-    //                   servo1Angle,
-    //                   servo2Angle,
-    //                   ConfigMode ? 1 : 0,
-    //                   TestMode ? 1 : 0,
-    //                   connectionState ? 1 : 0);
-    //     delay(500);
-    // }
-}
-
-String formatTime(float timeValue)
-{
-    int minutes = (int)timeValue;
-    int seconds = (int)((timeValue - minutes) * 100 + 0.5);
-    return String(minutes) + ":" + (seconds < 10 ? "0" : "") + String(seconds);
-}
-
-// Optimized decode function
-void decodeReceivedData(uint8_t *buffer, uint8_t len)
-{
-    int index = 0;
-
-    // Extract data (unchanged)
-    memcpy((void *)&sn, &buffer[index], 4);
-    index += 4;
-    memcpy((void *)&timeValue, &buffer[index], 4);
-    index += 4;
-    timeStr = formatTime(timeValue);
-    // testmode = buffer[index++] != 0;
-    remotestate = buffer[index++] != 0;
-    nano1 = buffer[index++] != 0;
-    nano2 = buffer[index++] != 0;
-    nano3 = buffer[index++] != 0;
-    nano4 = buffer[index++] != 0;
-    memcpy((void *)&analog1, &buffer[index], 4);
-    index += 4;
-    memcpy((void *)&analog2, &buffer[index], 4);
-    index += 4;
-
-    // Single printf call instead of 20+ Serial.print() calls
-    Serial.printf("%d,%d,%d,%d,%d,%u,%s,%d,%d,%d,%d,%d,%.2f,%.2f,%d,%.1f,",
-                  servo1Angle, servo2Angle, ConfigMode ? 1 : 0, TestMode ? 1 : 0,
-                  connectionState ? 1 : 0, sn, timeStr.c_str(),
-                  remotestate ? 1 : 0, nano1 ? 1 : 0, nano2 ? 1 : 0, nano3 ? 1 : 0,
-                  nano4 ? 1 : 0, analog1, analog2, rssi, snr);
-
-    if (TestMode)
-    {
-        memcpy((void *)&p1Value, &buffer[index], 4);
-        index += 4;
-        memcpy((void *)&p2Value, &buffer[index], 4);
-        index += 4;
-        memcpy((void *)&weight, &buffer[index], 4);
-        index += 4;
-        Serial.printf("%.2f,%.2f,%.4f\n", p1Value, p2Value, weight);
-    }
-    else
-    {
-        // Extract normal mode data...
-        valveState = buffer[index++] != 0;
-        memcpy((void *)&xPos, &buffer[index], 4);
-        index += 4;
-        memcpy((void *)&yPos, &buffer[index], 4);
-        index += 4;
-        memcpy((void *)&altitude, &buffer[index], 4);
-        index += 4;
-        memcpy((void *)&eulerX, &buffer[index], 4);
-        index += 4;
-        memcpy((void *)&eulerY, &buffer[index], 4);
-        index += 4;
-        memcpy((void *)&eulerZ, &buffer[index], 4);
-        index += 4;
-        memcpy((void *)&totalAccel, &buffer[index], 4);
-        index += 4;
-
-        if (index + 8 <= len)
-        {
-            memcpy((void *)&gpsLat, &buffer[index], 4);
-            index += 4;
-            memcpy((void *)&gpsLng, &buffer[index], 4);
-            index += 4;
-        }
-
-        Serial.printf("%d,%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,%.4f,%.6f,%.6f\n",
-                      valveState ? 1 : 0, xPos, yPos, altitude, eulerX, eulerY, eulerZ,
-                      totalAccel, gpsLat, gpsLng);
-    }
-
-    // Set output pins...
-    digitalWrite(NANO1_PIN, nano1 ? HIGH : LOW);
-    digitalWrite(NANO2_PIN, nano2 ? HIGH : LOW);
-    digitalWrite(NANO3_PIN, nano3 ? HIGH : LOW);
-    digitalWrite(NANO4_PIN, nano4 ? HIGH : LOW);
-    digitalWrite(REMOTE_PIN, remotestate ? HIGH : LOW);
-    digitalWrite(VALVE_PIN, valveState ? HIGH : LOW);
 }
