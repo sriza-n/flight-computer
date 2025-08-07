@@ -7,6 +7,7 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <SPI.h>
 
 // --- Pin Definitions ---
 constexpr uint8_t NANO1_PIN = 25;
@@ -15,6 +16,18 @@ constexpr uint8_t NANO3_PIN = 27;
 constexpr uint8_t NANO4_PIN = 32;
 constexpr uint8_t REMOTE_PIN = 33;
 constexpr uint8_t VALVE_PIN = 13;
+
+// XBee SPI Configuration
+#define XBEE_CS_PIN 5
+#define XBEE_RESET_PIN 4
+#define XBEE_SLEEP_PIN 2
+#define XBEE_IRQ_PIN 15     // XBee interrupt pin (optional but recommended)
+#define SPI_CLOCK_SPEED 1000000  // 1MHz for XBee
+
+// XBee SPI Frame Structure
+#define XBEE_START_DELIMITER 0x7E
+#define XBEE_RX_PACKET_64 0x80
+#define XBEE_RX_PACKET_16 0x81
 
 // --- Telemetry State Variables ---
 volatile uint32_t sn = 0;
@@ -49,6 +62,7 @@ int servo2Angle = 0;
 String timeStr = "";
 volatile unsigned long lastPacketTime = 0;
 volatile bool newDataAvailable = false;
+bool xbeeSpiReady = false;
 
 // --- WiFi & Server ---
 WebServer server(80);
@@ -58,10 +72,11 @@ bool wifiConnected = false;
 int rssi = -50;
 float snr = 10.0;
 
-// --- XBee ---
-#define XBEE_BAUD_RATE 115200
-#define PACKET_SIZE 72
-#define SERIAL_TIMEOUT 1000
+// --- XBee SPI Variables ---
+#define MAX_FRAME_SIZE 256
+uint8_t rxBuffer[MAX_FRAME_SIZE];
+volatile bool frameReceived = false;
+volatile int frameLength = 0;
 
 // --- Config Portal ---
 #define AP_SSID "GroundStation📥-Config"
@@ -86,10 +101,11 @@ String formatTime(float timeValue);
 void sendDataToServer();
 void receiveEvent(int numBytes);
 
-// --- XBee Helpers ---
-bool enterCommandMode();
-void sendAT(String cmd);
-void configureXBee();
+// --- XBee SPI Functions ---
+void initXBeeSPI();
+bool readXBeeFrame();
+uint8_t calculateChecksum(uint8_t* data, int length);
+void IRAM_ATTR xbeeInterrupt();
 
 // --- FreeRTOS Tasks ---
 void xbeeTask(void *pvParameters);
@@ -98,12 +114,13 @@ void serverTask(void *pvParameters);
 void setup()
 {
   Serial.begin(115200);
-  Serial.println("ESP32 LoRa Receiver Starting");
+  Serial.println("ESP32 XBee SPI Receiver Starting");
 
   preferences.begin("wifi", false);
-  Serial2.setRxBufferSize(1024);
-  Serial2.begin(XBEE_BAUD_RATE, SERIAL_8N1, 16, 17);
-  configureXBee();
+  
+  // Initialize XBee SPI first
+  initXBeeSPI();
+  
   setupOutputPins();
   setupWiFi();
 
@@ -114,7 +131,98 @@ void setup()
   xTaskCreatePinnedToCore(xbeeTask, "XBeeTask", 4096, NULL, 2, &xbeeTaskHandle, 0);
   xTaskCreatePinnedToCore(serverTask, "ServerTask", 4096, NULL, 1, &serverTaskHandle, 1);
 
-  Serial.println("Receiver ready!");
+  Serial.println("ESP32 XBee SPI Receiver ready!");
+}
+
+void initXBeeSPI() {
+  // Configure SPI pins
+  pinMode(XBEE_CS_PIN, OUTPUT);
+  pinMode(XBEE_RESET_PIN, OUTPUT);
+  pinMode(XBEE_SLEEP_PIN, OUTPUT);
+  pinMode(XBEE_IRQ_PIN, INPUT_PULLUP);
+  
+  digitalWrite(XBEE_CS_PIN, HIGH);
+  digitalWrite(XBEE_RESET_PIN, HIGH);
+  digitalWrite(XBEE_SLEEP_PIN, LOW);  // Keep awake
+  
+  // Initialize SPI
+  SPI.begin();
+  
+  // Reset XBee
+  digitalWrite(XBEE_RESET_PIN, LOW);
+  delay(10);
+  digitalWrite(XBEE_RESET_PIN, HIGH);
+  delay(1000);  // Wait for XBee to boot
+  
+  // Attach interrupt for XBee data ready (optional)
+  attachInterrupt(digitalPinToInterrupt(XBEE_IRQ_PIN), xbeeInterrupt, FALLING);
+  
+  xbeeSpiReady = true;
+  Serial.println("XBee SPI initialized");
+}
+
+void IRAM_ATTR xbeeInterrupt() {
+  // Simple flag to indicate data is available
+  // Actual reading will be done in the task
+}
+
+uint8_t calculateChecksum(uint8_t* data, int length) {
+  uint16_t sum = 0;
+  for (int i = 0; i < length; i++) {
+    sum += data[i];
+  }
+  return 0xFF - (sum & 0xFF);
+}
+
+bool readXBeeFrame() {
+  if (!xbeeSpiReady) return false;
+  
+  // Check if data is available by attempting to read
+  digitalWrite(XBEE_CS_PIN, LOW);
+  SPI.beginTransaction(SPISettings(SPI_CLOCK_SPEED, MSBFIRST, SPI_MODE0));
+  
+  // Send dummy byte to check for start delimiter
+  uint8_t startByte = SPI.transfer(0x00);
+  
+  if (startByte != XBEE_START_DELIMITER) {
+    SPI.endTransaction();
+    digitalWrite(XBEE_CS_PIN, HIGH);
+    return false;
+  }
+  
+  // Read frame length (2 bytes)
+  uint8_t lengthMSB = SPI.transfer(0x00);
+  uint8_t lengthLSB = SPI.transfer(0x00);
+  int frameLen = (lengthMSB << 8) | lengthLSB;
+  
+  if (frameLen > MAX_FRAME_SIZE - 3) {
+    SPI.endTransaction();
+    digitalWrite(XBEE_CS_PIN, HIGH);
+    Serial.println("Frame too large");
+    return false;
+  }
+  
+  // Read frame data + checksum
+  for (int i = 0; i < frameLen; i++) {
+    rxBuffer[i] = SPI.transfer(0x00);
+  }
+  
+  SPI.endTransaction();
+  digitalWrite(XBEE_CS_PIN, HIGH);
+  
+  // Verify checksum
+  uint8_t receivedChecksum = rxBuffer[frameLen - 1];
+  uint8_t calculatedChecksum = calculateChecksum(rxBuffer, frameLen - 1);
+  
+  if (receivedChecksum != calculatedChecksum) {
+    Serial.println("Checksum error");
+    return false;
+  }
+  
+  frameLength = frameLen - 1; // Exclude checksum from frame length
+  frameReceived = true;
+  
+  return true;
 }
 
 void setupOutputPins()
@@ -191,7 +299,7 @@ void handleRoot()
                 ".footer{text-align:center;margin-top:30px;padding:15px;color:#666;font-size:14px;border-top:1px solid #ddd;}"
                 "</style></head><body>"
                 "<div class=\"container\">"
-                "<h1>Ground Station Config</h1>"
+                "<h1>Ground Station Config (SPI)</h1>"
                 "<div class=\"status" +
                 String(!wifiConnected ? " disconnected" : "") + "\">"
                                                                 "<strong>WiFi Status:</strong> " +
@@ -201,10 +309,12 @@ void handleRoot()
                                                                     "<strong>IP Address:</strong> " +
                 currentIP + "<br>"
                             "<strong>Server URL:</strong> " +
-                currentServerURL + "</div>"
-                                   "<form action=\"/config\" method=\"POST\">"
-                                   "<label for=\"ssid\">WiFi Network Name (SSID):</label>"
-                                   "<input type=\"text\" id=\"ssid\" name=\"ssid\" placeholder=\"Enter WiFi network name\" value=\"" +
+                currentServerURL + "<br>"
+                                   "<strong>XBee Status:</strong> " +
+                (xbeeSpiReady ? "SPI Ready" : "Not Ready") + "</div>"
+                                                             "<form action=\"/config\" method=\"POST\">"
+                                                             "<label for=\"ssid\">WiFi Network Name (SSID):</label>"
+                                                             "<input type=\"text\" id=\"ssid\" name=\"ssid\" placeholder=\"Enter WiFi network name\" value=\"" +
                 currentSSID + "\">"
                               "<label for=\"password\">WiFi Password:</label>"
                               "<input type=\"password\" id=\"password\" name=\"password\" placeholder=\"Leave empty to keep current password\">"
@@ -213,7 +323,7 @@ void handleRoot()
                 currentServerURL + "\">"
                                    "<input type=\"submit\" value=\"Save Configuration & Restart\">"
                                    "</form>"
-                                   "<div class=\"footer\">Developed by <strong>Srijan Koju</strong></div>"
+                                   "<div class=\"footer\">Developed by <strong>Srijan Koju</strong> - XBee SPI Mode</div>"
                                    "</div></body></html>";
   server.send(200, "text/html", html);
 }
@@ -309,7 +419,8 @@ void sendDataToServer()
            "\"servo2_angle\":%d,"
            "\"config_mode\":%d,"
            "\"test_mode\":%d,"
-           "\"connection_state\":%d"
+           "\"connection_state\":%d,"
+           "\"comm_type\":\"SPI\""
            "}",
            timeStr.c_str(), sn, analog1, analog2,
            remotestate ? 1 : 0, nano1 ? 1 : 0, nano2 ? 1 : 0,
@@ -347,83 +458,59 @@ void receiveEvent(int numBytes)
   }
 }
 
-bool enterCommandMode()
-{
-  while (Serial2.available())
-    Serial2.read();
-  delay(1100);
-  Serial2.print("+++");
-  delay(1100);
-  unsigned long start = millis();
-  String resp = "";
-  while (millis() - start < SERIAL_TIMEOUT)
-  {
-    if (Serial2.available())
-      resp += (char)Serial2.read();
-    if (resp.indexOf("OK") != -1)
-      return true;
-  }
-  return false;
-}
-
-void sendAT(String cmd)
-{
-  Serial2.print(cmd + "\r");
-  delay(200);
-  while (Serial2.available())
-    Serial2.read();
-}
-
-void configureXBee()
-{
-  if (!enterCommandMode())
-  {
-    Serial.println("XBee: Command mode failed");
-    return;
-  }
-  // sendAT("ATHP 0");                // Enable hardware flow control
-  // sendAT("ATID 1011");             // PAN ID
-  // sendAT("ATCM FFFFFFFE00000000"); // Coordinator address
-  // sendAT("ATBD 7");                // 115200 baud
-  // sendAT("ATAP 0");                // Transparent mode
-  // sendAT("ATNH 1");                // Max hops
-  // sendAT("ATMT 1");                // Transmission failure threshold
-  // sendAT("ATRR 3");                // Retry count
-  // sendAT("ATCE 0");                // Standard router
-  // sendAT("ATRO 1");                // No delay in serial packetization
-  // sendAT("ATPL 4");
-  // sendAT("ATWR");                  // Save
-  // sendAT("ATCN");  
-  Serial.println("XBee: Configured");
-}
-
-// --- FreeRTOS Task 1: Read buffer from XBee ---
+// --- FreeRTOS Task 1: Read XBee SPI data ---
 void xbeeTask(void *pvParameters)
 {
   for (;;)
   {
-    while (Serial2.available() >= PACKET_SIZE)
-    {
-      if (Serial2.peek() != 0xAA)
-      {
-        Serial2.read();
-        continue;
+    if (readXBeeFrame() && frameReceived) {
+      // Check if this is a received data packet
+      if (frameLength > 0 && (rxBuffer[0] == 0x80 || rxBuffer[0] == 0x81)) {
+        
+        int dataStartOffset;
+        if (rxBuffer[0] == 0x80) {
+          dataStartOffset = 11;  // 64-bit packet data starts at index 11
+          rssi = -rxBuffer[9];   // RSSI is at index 9 (negative value)
+        } else {
+          dataStartOffset = 5;   // 16-bit packet data starts at index 5
+          rssi = -rxBuffer[3];   // RSSI is at index 3 (negative value)
+        }
+        
+        // Look for our data start marker (0xAA) in the data portion
+        int dataStart = -1;
+        for (int i = dataStartOffset; i < frameLength - 1; i++) {
+          if (rxBuffer[i] == 0xAA) {
+            dataStart = i;
+            break;
+          }
+        }
+        
+        // Calculate expected payload size (excluding XBee overhead and markers)
+        // Actual data size: 62 bytes (without start/end markers)
+        int expectedDataSize = 62;  // Changed from 72 to 62
+        
+        // Check if we have enough data and look for end marker
+        if (dataStart != -1 && (frameLength - dataStart) >= (expectedDataSize + 2)) {
+          // Look for end marker (0x55) at the correct position
+          if (rxBuffer[dataStart + expectedDataSize + 1] == 0x55) {
+            // Valid packet found - decode it
+            decodeReceivedData(&rxBuffer[dataStart], expectedDataSize + 2);
+            newDataAvailable = true;
+            Serial.printf("SPI packet received (Type: 0x%02X, RSSI: %d dBm, Data size: %d)\n", 
+                         rxBuffer[0], rssi, expectedDataSize + 2);
+          } else {
+            Serial.printf("End marker not found at expected position. Found: 0x%02X\n", 
+                         rxBuffer[dataStart + expectedDataSize + 1]);
+          }
+        } else {
+          Serial.printf("Insufficient data. Available: %d, Expected: %d\n", 
+                       frameLength - dataStart, expectedDataSize + 2);
+        }
       }
-      if (Serial2.available() < PACKET_SIZE)
-        break;
-      uint8_t buffer[PACKET_SIZE];
-      size_t bytesRead = Serial2.readBytes(buffer, PACKET_SIZE);
-      if (buffer[0] == 0xAA && buffer[PACKET_SIZE - 1] == 0x55)
-      {
-        decodeReceivedData(buffer, PACKET_SIZE);
-        newDataAvailable = true;
-      }
-      else
-      {
-        Serial2.read();
-      }
+      frameReceived = false;
     }
-    vTaskDelay(20 / portTICK_PERIOD_MS);
+    
+    vTaskDelay(10 / portTICK_PERIOD_MS);
   }
 }
 
@@ -438,7 +525,7 @@ void serverTask(void *pvParameters)
 
     if (newDataAvailable)
     {
-      Serial.printf("%u,%s,%d,%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,%.4f,%.6f,%.6f,%d,%.1f,%.2f,%.2f,%.4f,%d,%d,%d,%d,%d\n",
+      Serial.printf("SPI: %u,%s,%d,%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,%.4f,%.6f,%.6f,%d,%.1f,%.2f,%.2f,%.4f,%d,%d,%d,%d,%d\n",
                     sn, timeStr.c_str(),
                     remotestate ? 1 : 0, nano1 ? 1 : 0, nano2 ? 1 : 0, nano3 ? 1 : 0,
                     nano4 ? 1 : 0, valveState ? 1 : 0, analog1, analog2,
@@ -462,10 +549,12 @@ void serverTask(void *pvParameters)
   }
 }
 
-// --- Decode function ---
+// --- Decode function for SPI data ---
 void decodeReceivedData(uint8_t *buffer, uint8_t len)
 {
-  int index = 1;
+  int index = 1; // Skip start marker (0xAA)
+  
+  // Unpack data in the same order as transmitter
   memcpy((void *)&sn, &buffer[index], 4);
   index += 4;
   memcpy((void *)&timeValue, &buffer[index], 4);
@@ -505,8 +594,11 @@ void decodeReceivedData(uint8_t *buffer, uint8_t len)
   index += 4;
   memcpy((void *)&gpsLng, &buffer[index], 4);
   index += 4;
+  
+  lastPacketTime = millis();
 }
 
 void loop()
 {
+  // FreeRTOS handles everything
 }

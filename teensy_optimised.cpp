@@ -520,7 +520,7 @@ void configureXBee()
   sendAT("ATMT 1");
   sendAT("ATRR 1");
   sendAT("ATCE 0");
-  sendAT("ATRO 0");
+  sendAT("ATRO 1");
   sendAT("ATWR");
   sendAT("ATCN");
   Serial.println("XBee: Configured");

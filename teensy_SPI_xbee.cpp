@@ -20,9 +20,19 @@
 // gps
 #include <TinyGPS++.h>
 
-// xbee pin
-//  pin 2 with pin7 teensy
-//  pin 3 with pin8 teensy
+// XBee SPI Configuration
+#define XBEE_CS_PIN 10
+#define XBEE_RESET_PIN 9
+#define XBEE_SLEEP_PIN 8
+#define SPI_CLOCK_SPEED 1000000 // 1MHz for XBee
+
+// XBee SPI Frame Structure
+#define XBEE_START_DELIMITER 0x7E
+#define XBEE_TX_REQUEST_16 0x01
+#define XBEE_TX_REQUEST_64 0x00
+
+// XBee SPI communication variables
+bool xbeeSpiReady = false;
 
 // BMP280 barometric pressure/altitude sensors
 Adafruit_BMP280 bmp1(&Wire);  // First sensor on primary I2C bus
@@ -104,15 +114,6 @@ unsigned long lastReceiveTime = 0;
 bool dataReceived = false;
 bool testmode = false;
 unsigned long para_height = 5;
-
-// RF frequency - set according to your region (915MHz for US, 868MHz for EU)
-// #define RF95_FREQ 500
-
-// float loraFreq = 500.0;          // Default frequency in MHz
-// long loraBandwidth = 125000;     // Default bandwidth in Hz
-// uint8_t loraCodingRate = 5;      // Default coding rate (4/5)
-// uint8_t loraSpreadingFactor = 9; // Default spreading factor
-// bool loraUpdatePending = false;
 
 // GPS variables
 TinyGPSPlus gps;
@@ -197,7 +198,7 @@ bool writeCSVFile()
                 String(gpsLat, 6) + "," +
                 String(gpsLng, 6) + "," +
                 InternalTemp + "," +
-                String(P1) + "," +  
+                String(P1) + "," +
                 String(P2) + "," +
                 weight + "," +
                 totalAccel;
@@ -261,101 +262,200 @@ void receiveEvent(int numBytes)
   }
 }
 
-// Function to transmit all data in binary format
-
-void transmitBinaryData()
+uint8_t calculateChecksum(uint8_t *data, int length)
 {
-  uint8_t buffer[72];
-  int index = 0;
+  uint16_t sum = 0;
+  for (int i = 0; i < length; i++)
+  {
+    sum += data[i];
+  }
+  return 0xFF - (sum & 0xFF);
+}
 
-  // Add start byte
-  buffer[index++] = 0xAA;
+bool sendXBeeFrame(uint8_t *payload, int payloadLength)
+{
+  if (!xbeeSpiReady)
+    return false;
+
+  // Calculate total frame length
+  int frameLength = payloadLength + 1; // +1 for checksum
+
+  // Use dynamic allocation or increase static buffer size
+  uint8_t frame[frameLength + 3]; // +3 for start delimiter and length bytes
+  int frameIndex = 0;
+
+  // Start delimiter
+  frame[frameIndex++] = XBEE_START_DELIMITER;
+
+  // Length (MSB, LSB)
+  frame[frameIndex++] = (frameLength >> 8) & 0xFF;
+  frame[frameIndex++] = frameLength & 0xFF;
+
+  // Payload
+  for (int i = 0; i < payloadLength; i++)
+  {
+    frame[frameIndex++] = payload[i];
+  }
+
+  // Checksum
+  frame[frameIndex++] = calculateChecksum(payload, payloadLength);
+
+  // Send frame via SPI
+  digitalWrite(XBEE_CS_PIN, LOW);
+  SPI.beginTransaction(SPISettings(SPI_CLOCK_SPEED, MSBFIRST, SPI_MODE0));
+
+  for (int i = 0; i < frameIndex; i++)
+  {
+    SPI.transfer(frame[i]);
+  }
+
+  SPI.endTransaction();
+  digitalWrite(XBEE_CS_PIN, HIGH);
+
+  return true;
+}
+
+void transmitBinaryDataSPI()
+{
+  // Calculate required buffer size:
+  // API overhead: 10 bytes (frame type + frame ID + 64-bit address + options)
+  // Start byte: 1 byte (0xAA)
+  // Serial number: 4 bytes
+  // Time: 4 bytes
+  // Remote state: 1 byte
+  // Nano values: 4 bytes
+  // Analog values: 8 bytes
+  // P1, P2, weight: 12 bytes
+  // Valve state: 1 byte
+  // Position values: 8 bytes
+  // Altitude: 4 bytes
+  // Euler angles: 12 bytes
+  // Total acceleration: 4 bytes
+  // GPS coordinates: 8 bytes
+  // End byte: 1 byte
+  // Total: 82 bytes
+
+  uint8_t payload[84]; // Increased to 84 to provide safety margin
+  size_t index = 0;    // Changed from int to size_t to match sizeof() return type
+
+  // API Frame Type (TX Request 64-bit)
+  payload[index++] = XBEE_TX_REQUEST_64;
+
+  // Frame ID (0 = no response requested)
+  payload[index++] = 0x01;
+
+  // 64-bit destination address (broadcast = 0x000000000000FFFF)
+  payload[index++] = 0x00;
+  payload[index++] = 0x00;
+  payload[index++] = 0x00;
+  payload[index++] = 0x00;
+  payload[index++] = 0x00;
+  payload[index++] = 0x00;
+  payload[index++] = 0xFF;
+  payload[index++] = 0xFF;
+
+  // Options
+  payload[index++] = 0x00;
+
+  // Add start byte for data
+  payload[index++] = 0xAA;
 
   // Pack record serial number (4 bytes)
   uint32_t sn = recordSN;
-  memcpy(&buffer[index], &sn, 4);
+  memcpy(&payload[index], &sn, 4);
   index += 4;
 
   // Pack time as a float to preserve decimal portion (4 bytes)
-  float timeValue = minute(now()) + (second(now()) / 100.0f); // Convert to MM.SS format
-  memcpy(&buffer[index], &timeValue, 4);
+  float timeValue = minute(now()) + (second(now()) / 100.0f);
+  memcpy(&payload[index], &timeValue, 4);
   index += 4;
 
   // Pack remotestate (1 byte)
-  buffer[index++] = remotestate ? 1 : 0;
+  payload[index++] = remotestate ? 1 : 0;
 
   // Pack nano values (4 bytes)
-  buffer[index++] = nanoValue1 ? 1 : 0;
-  buffer[index++] = nanoValue2 ? 1 : 0;
-  buffer[index++] = nanoValue3 ? 1 : 0;
-  buffer[index++] = nanoValue4 ? 1 : 0;
+  payload[index++] = nanoValue1 ? 1 : 0;
+  payload[index++] = nanoValue2 ? 1 : 0;
+  payload[index++] = nanoValue3 ? 1 : 0;
+  payload[index++] = nanoValue4 ? 1 : 0;
 
   // Pack analog values (8 bytes)
   float a1 = analog1;
   float a2 = analog2;
-  memcpy(&buffer[index], &a1, 4);
+  memcpy(&payload[index], &a1, 4);
   index += 4;
-  memcpy(&buffer[index], &a2, 4);
+  memcpy(&payload[index], &a2, 4);
   index += 4;
 
   // Pack P1, P2, weight (12 bytes)
   float p1Value = (float)P1;
-  memcpy(&buffer[index], &p1Value, 4);
+  memcpy(&payload[index], &p1Value, 4);
   index += 4;
   float p2Value = (float)P2;
-  memcpy(&buffer[index], &p2Value, 4);
+  memcpy(&payload[index], &p2Value, 4);
   index += 4;
   float weightValue = weight;
-  memcpy(&buffer[index], &weightValue, 4);
+  memcpy(&payload[index], &weightValue, 4);
   index += 4;
 
   // Pack valve state (1 byte)
-  buffer[index++] = Valve_state ? 1 : 0;
+  payload[index++] = Valve_state ? 1 : 0;
 
   // Pack position values (8 bytes)
   float xp = xPos;
   float yp = yPos;
-  memcpy(&buffer[index], &xp, 4);
+  memcpy(&payload[index], &xp, 4);
   index += 4;
-  memcpy(&buffer[index], &yp, 4);
+  memcpy(&payload[index], &yp, 4);
   index += 4;
 
   // Pack altitude (4 bytes)
   float alt = averageAltitude;
-  memcpy(&buffer[index], &alt, 4);
+  memcpy(&payload[index], &alt, 4);
   index += 4;
 
   // Pack euler angles (12 bytes)
   float ex = euler.x(), ey = euler.y(), ez = euler.z();
-  memcpy(&buffer[index], &ex, 4);
+  memcpy(&payload[index], &ex, 4);
   index += 4;
-  memcpy(&buffer[index], &ey, 4);
+  memcpy(&payload[index], &ey, 4);
   index += 4;
-  memcpy(&buffer[index], &ez, 4);
+  memcpy(&payload[index], &ez, 4);
   index += 4;
 
   // Pack total acceleration (4 bytes)
   float totalAccelValue = totalAccel;
-  memcpy(&buffer[index], &totalAccelValue, 4);
+  memcpy(&payload[index], &totalAccelValue, 4);
   index += 4;
 
   // Pack GPS coordinates (8 bytes)
   float lat = gpsLat;
   float lng = gpsLng;
-  memcpy(&buffer[index], &lat, 4);
+  memcpy(&payload[index], &lat, 4);
   index += 4;
-  memcpy(&buffer[index], &lng, 4);
+  memcpy(&payload[index], &lng, 4);
   index += 4;
+
+  // Add bounds checking before writing end byte
+  if (index >= sizeof(payload)) {
+    Serial.print("ERROR: Payload overflow! Index: ");
+    Serial.print(index);
+    Serial.print(" Max: ");
+    Serial.println(sizeof(payload));
+    return;
+  }
 
   // Add end byte
-  buffer[index++] = 0x55;
+  payload[index++] = 0x55;
 
-  // Transmit the binary packet through XBee (Serial2)
-  Serial2.write(buffer, index);
-  Serial2.flush(); // Ensure all data is sent
-  Serial.print("Binary data sent: ");
-  Serial.print(index);
-  Serial.println(" bytes");
+  // Send via SPI
+  if (sendXBeeFrame(payload, (int)index)) {  // Cast to int for function parameter
+    Serial.print("SPI data sent: ");
+    Serial.print(index);
+    Serial.println(" bytes");
+  } else {
+    Serial.println("SPI transmission failed");
+  }
 }
 
 void task1()
@@ -435,7 +535,7 @@ void task2()
     if (Valve_state)
     {
       analogWriteFrequency(Valve_PIN, 1000); // Set PWM frequency to 1kHz
-      analogWrite(Valve_PIN, 192); // Activate valve with full PWM
+      analogWrite(Valve_PIN, 192);           // Activate valve with full PWM
     }
     else
     {
@@ -518,7 +618,7 @@ void task3()
     Serial.println(data);
 
     // need to do binary encoding to transmit it
-    transmitBinaryData();
+    transmitBinaryDataSPI();
 
     delay(100);
   }
@@ -682,68 +782,26 @@ void adc0_isr()
 }
 
 // --- XBee Command Helpers ---
-bool enterCommandMode()
+void initXBeeSPI()
 {
-  while (Serial2.available())
-    Serial2.read();
-  delay(1100);
-  Serial2.print("+++");
-  delay(1100);
+  pinMode(XBEE_CS_PIN, OUTPUT);
+  pinMode(XBEE_RESET_PIN, OUTPUT);
+  pinMode(XBEE_SLEEP_PIN, OUTPUT);
 
-  unsigned long start = millis();
-  String resp = "";
-  while (millis() - start < SERIAL_TIMEOUT)
-  {
-    if (Serial2.available())
-      resp += (char)Serial2.read();
-    if (resp.indexOf("OK") != -1)
-      return true;
-  }
-  return false;
-}
+  digitalWrite(XBEE_CS_PIN, HIGH);
+  digitalWrite(XBEE_RESET_PIN, HIGH);
+  digitalWrite(XBEE_SLEEP_PIN, LOW); // Keep awake
 
-void sendAT(String cmd)
-{
-  Serial2.print(cmd + "\r");
-  delay(200);
-  while (Serial2.available())
-    Serial2.read(); // flush
-}
+  SPI.begin();
 
-void configureXBee()
-{
-  if (!enterCommandMode())
-  {
-    Serial.println("XBee: Command mode failed");
-    return;
-  }
-  // sendAT("ATHP 0");                // Disable hardware flow control
-  // sendAT("ATID 1011");             // Set PAN ID
-  // sendAT("ATCM FFFFFFFE00000000"); // Set coordinator address
-  // sendAT("ATBD 7");                // Set baud rate to 115200
-  // sendAT("ATAP 0");                // Set API mode to 0 (transparent mode)
-  // sendAT("ATNH 1");                // Set node identifier (optional)
-  // sendAT("ATMT 3");                // Set maximum transmission retries
-  // sendAT("ATRR 3");                // Set retry count for transmission
-  // sendAT("ATCE 0");                // message mode
-  // // sendAT("ATKY 3FA7C21898D24F619E4A7DB1ED8F102B");
-  // sendAT("ATWR");                  // Write settings to non-volatile memory
-  // sendAT("ATCN");                  // Exit command mode
-  // sendAT("ATHP 1");                // Enable hardware flow control
-  sendAT("ATID 1011");             // PAN ID
-  sendAT("ATCM FFFFFFFE00000000"); // Coordinator address
-  sendAT("ATBD 7");                // 115200 baud
-  sendAT("ATAP 0");                // Transparent mode
-  sendAT("ATNH 1");                // Max hops
-  sendAT("ATMT 1");                // Transmission failure threshold
-  sendAT("ATRR 10");                // Retry count
-  // sendAT("ATCE 0");                // Standard router
-  // sendAT("ATRO 0");                // No delay in serial packetization
-  sendAT("ATPL 0");
-  sendAT("ATWR");                  // Save
-  sendAT("ATCN");                  // Exit
+  // Reset XBee
+  digitalWrite(XBEE_RESET_PIN, LOW);
+  delay(10);
+  digitalWrite(XBEE_RESET_PIN, HIGH);
+  delay(1000); // Wait for XBee to boot
 
-  Serial.println("XBee: Configured");
+  xbeeSpiReady = true;
+  Serial.println("XBee SPI initialized");
 }
 
 void setup()
@@ -873,10 +931,8 @@ void setup()
   }
   delay(1000);
   // Configure XBee
-  Serial2.begin(XBEE_BAUD_RATE, SERIAL_8N1); // Initialize XBee serial port
-  delay(1000);
-  configureXBee();
-  Serial.println("Xbee configured successfully!");
+  initXBeeSPI();
+  Serial.println("XBee SPI configured successfully!");
 
   // Start each task with error checking
   if (threads.addThread(task1) == -1)

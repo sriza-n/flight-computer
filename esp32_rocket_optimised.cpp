@@ -27,7 +27,8 @@ constexpr uint8_t VALVE2_SERVO_PIN = 14;
 constexpr uint8_t TEENSY_POWER_PIN = 15;
 
 // Configurable parameters
-unsigned long ignitionOnDelay = 1000;
+unsigned long valve1OpenDelay = 1000; // Delay before valve1 opens
+unsigned long valve2OpenDelay = 2000; // Delay before valve2 opens (can be different)
 unsigned long ignitionWaitingDelay = 15000;
 unsigned long parsuitedeploy = 5;
 
@@ -192,7 +193,8 @@ Valve valve1(VALVE1_SERVO_PIN), valve2(VALVE2_SERVO_PIN);
 void loadPreferences()
 {
     preferences.begin("rocket-config", false);
-    ignitionOnDelay = preferences.getULong("ignOnDelay", 1000);
+    valve1OpenDelay = preferences.getULong("v1Delay", 1000);
+    valve2OpenDelay = preferences.getULong("v2Delay", 2000);
     ignitionWaitingDelay = preferences.getULong("ignWaitDelay", 15000);
     parsuitedeploy = preferences.getULong("parsuitedeploy", 5);
     preferences.end();
@@ -201,7 +203,8 @@ void loadPreferences()
 void savePreferences()
 {
     preferences.begin("rocket-config", false);
-    preferences.putULong("ignOnDelay", ignitionOnDelay);
+    preferences.putULong("v1Delay", valve1OpenDelay);
+    preferences.putULong("v2Delay", valve2OpenDelay);
     preferences.putULong("ignWaitDelay", ignitionWaitingDelay);
     preferences.putULong("parsuitedeploy", parsuitedeploy);
     preferences.end();
@@ -236,20 +239,30 @@ void handleRoot()
     html += "<form action=\"/save\" method=\"POST\">";
 
     html += "<div class=\"section\">"
-            "<h2>Engine Configuration</h2>"
-            "<label for=\"ignDelay\">Valve Open Delay (ms):</label>"
-            "<input type=\"number\" id=\"ignDelay\" name=\"ignDelay\" value=\"" +
-            String(ignitionOnDelay) + "\" min=\"500\" max=\"10000\">"
-            "<small>Time delay before valves open after ignition (500-10000ms)</small>"
-            "<label for=\"waitDelay\">Valve Open Duration (ms):</label>"
-            "<input type=\"number\" id=\"waitDelay\" name=\"waitDelay\" value=\"" +
+            "<h2>Valve Timing Configuration</h2>"
+            "<label for=\"v1Delay\">Valve 1 Open Delay (ms)[after ignition triggered]:</label>"
+            "<input type=\"number\" id=\"v1Delay\" name=\"v1Delay\" value=\"" +
+            String(valve1OpenDelay) + "\" min=\"0\" max=\"10000\">"
+                                      "<small>Time delay valve 1 opens after ignition (0-10000ms)</small>"
+
+                                      "<label for=\"v2Delay\">Valve 2 Open Delay (ms)[after ignition triggered]:</label>"
+                                      "<input type=\"number\" id=\"v2Delay\" name=\"v2Delay\" value=\"" +
+            String(valve2OpenDelay) + "\" min=\"0\" max=\"10000\">"
+                                      "<small>Time delay valve 2 opens after ignition (0-10000ms)</small>"
+
+                                      "<label for=\"waitDelay\">Valve Open Duration(ms)[after ignition triggered]:</label>"
+                                      "<input type=\"number\" id=\"waitDelay\" name=\"waitDelay\" value=\"" +
             String(ignitionWaitingDelay) + "\" min=\"1000\" max=\"90000\">"
-            "<small>How long valves stay open during ignition (1000-90000ms)</small>"
+                                           "<small>How long valves stay open during ignition (1000-90000ms)</small>"
+                                           "</div>";
+
+    html += "<div class=\"section\">"
+            "<h2>Parachute Configuration</h2>"
             "<label for=\"parsuitedeploy\">Parachute Deploy Altitude Change (m):</label>"
             "<input type=\"number\" id=\"parsuitedeploy\" name=\"parsuitedeploy\" value=\"" +
             String(parsuitedeploy) + "\" min=\"0\" max=\"100\">"
-            "<small>Altitude change threshold for parachute deployment (0-100m)</small>"
-            "</div>";
+                                     "<small>Altitude change threshold for parachute deployment (0-100m)</small>"
+                                     "</div>";
 
     html += "<input type=\"submit\" value=\"Save Configuration\">";
     html += "</form>";
@@ -262,13 +275,15 @@ void handleRoot()
 
 void handleSave()
 {
-    if (server.hasArg("ignDelay") && server.hasArg("waitDelay"))
+    if (server.hasArg("v1Delay") && server.hasArg("v2Delay") && server.hasArg("waitDelay"))
     {
-        ignitionOnDelay = server.arg("ignDelay").toInt();
+        valve1OpenDelay = server.arg("v1Delay").toInt();
+        valve2OpenDelay = server.arg("v2Delay").toInt();
         ignitionWaitingDelay = server.arg("waitDelay").toInt();
         parsuitedeploy = server.arg("parsuitedeploy").toInt();
 
-        ignitionOnDelay = constrain(ignitionOnDelay, 500, 10000);
+        valve1OpenDelay = constrain(valve1OpenDelay, 0, 10000);
+        valve2OpenDelay = constrain(valve2OpenDelay, 0, 10000);
         ignitionWaitingDelay = constrain(ignitionWaitingDelay, 1000, 90000);
         parsuitedeploy = constrain(parsuitedeploy, 0, 100);
 
@@ -333,7 +348,7 @@ void loop()
 
 void RadioCmdTask(void *pvParameters)
 {
-    const TickType_t xDelay = pdMS_TO_TICKS(25);
+    const TickType_t xDelay = pdMS_TO_TICKS(5);
     unsigned long lastRadioAvailableTime = 0;
 
     for (;;)
@@ -342,7 +357,8 @@ void RadioCmdTask(void *pvParameters)
         {
             uint8_t buffer[32];
             uint8_t len = radio.getDynamicPayloadSize();
-            if (len > sizeof(buffer)) len = sizeof(buffer);
+            if (len > sizeof(buffer))
+                len = sizeof(buffer);
             radio.read(&buffer, len);
 
             if (len >= 5)
@@ -356,8 +372,10 @@ void RadioCmdTask(void *pvParameters)
                 haltState = (digitalFlags & 0x10) != 0;
                 TestMode = (digitalFlags & 0x20) != 0;
                 ConfigMode = (digitalFlags & 0x40) != 0;
-                memcpy(&servo1Angle, &buffer[index], 2); index += 2;
-                memcpy(&servo2Angle, &buffer[index], 2); index += 2;
+                memcpy(&servo1Angle, &buffer[index], 2);
+                index += 2;
+                memcpy(&servo2Angle, &buffer[index], 2);
+                index += 2;
             }
             lastRadioAvailableTime = millis();
         }
@@ -414,10 +432,16 @@ void RadioCmdTask(void *pvParameters)
         switch (ignitionStateMachine)
         {
         case IgnitionState::IGNITION_ON:
-            if (millis() - ignitionStartTime >= ignitionOnDelay)
+            if (millis() - ignitionStartTime >= valve1OpenDelay && !valve1.isOpen())
             {
                 valve1.open(servo1Angle);
+            }
+            if (millis() - ignitionStartTime >= valve2OpenDelay && !valve2.isOpen())
+            {
                 valve2.open(servo2Angle);
+            }
+            if (millis() - ignitionStartTime >= max(valve1OpenDelay, valve2OpenDelay))
+            {
                 ignitionStateMachine = IgnitionState::VALVES_OPENING;
             }
             break;
@@ -530,14 +554,14 @@ void ValveI2CTask(void *pvParameters)
                     valve2.close();
                 }
             }
-            if (haltState && ignitionStateMachine != IgnitionState::IDLE)
-            {
-                ignitionStateMachine = IgnitionState::IDLE;
-                outputState2 = false;
-                digitalWrite(IGNITION_PIN, LOW);
-                valve1.close();
-                valve2.close();
-            }
+        }
+        if (haltState && ignitionStateMachine != IgnitionState::IDLE)
+        {
+            ignitionStateMachine = IgnitionState::IDLE;
+            outputState2 = false;
+            digitalWrite(IGNITION_PIN, LOW);
+            valve1.close();
+            valve2.close();
         }
         uint8_t dataPacket[7] = {
             static_cast<uint8_t>(valve1.isOpen()),
@@ -546,8 +570,7 @@ void ValveI2CTask(void *pvParameters)
             static_cast<uint8_t>(outputState2),
             static_cast<uint8_t>(masterStateHigh),
             static_cast<uint8_t>(TestMode),
-            static_cast<uint8_t>(parsuitedeploy)
-        };
+            static_cast<uint8_t>(parsuitedeploy)};
         Wire.beginTransmission(TEENSY_I2C_ADDRESS);
         Wire.write(dataPacket, 7);
         Wire.endTransmission();
